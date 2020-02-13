@@ -400,8 +400,8 @@ ca_getreq(struct iked *env, struct imsg *imsg)
 			print_hex(ptr, i, SHA_DIGEST_LENGTH);
 			continue;
 		}
-
-		log_debug("%s: found CA %s", __func__, ca->name);
+		log_debug("%s: found CA %s", __func__, X509_NAME_oneline
+				(X509_get_subject_name(ca), NULL, 0));
 
 		if ((cert = ca_by_issuer(store->ca_certs,
 		    X509_get_subject_name(ca), &id)) != NULL) {
@@ -418,7 +418,8 @@ ca_getreq(struct iked *env, struct imsg *imsg)
 		return (0);
 	}
 
-	log_debug("%s: found local certificate %s", __func__, cert->name);
+	log_debug("%s: found local certificate %s", __func__, X509_NAME_oneline
+				(X509_get_subject_name(cert), NULL, 0));
 
 	if ((buf = ca_x509_serialize(cert)) == NULL)
 		return (-1);
@@ -499,7 +500,7 @@ ca_reload(struct iked *env)
 	STACK_OF(X509_OBJECT)	*h;
 	X509_OBJECT		*xo;
 	X509			*x509;
-	int			 i, len;
+	u_int			 i, len;
 	u_int8_t		 md[EVP_MAX_MD_SIZE];
 	struct iovec		 iov[2];
 	int			 iovcnt = 2;
@@ -567,16 +568,17 @@ ca_reload(struct iked *env)
 	if ((env->sc_certreq = ibuf_new(NULL, 0)) == NULL)
 		return (-1);
 
-	h = store->ca_cas->objs;
+	h = X509_STORE_get0_objects(store->ca_cas);
 	for (i = 0; i < sk_X509_OBJECT_num(h); i++) {
 		xo = sk_X509_OBJECT_value(h, i);
-		if (xo->type != X509_LU_X509)
+		if (X509_OBJECT_get_type(xo) != X509_LU_X509)
 			continue;
 
-		x509 = xo->data.x509;
+		x509 = X509_OBJECT_get0_X509(xo);
 		len = sizeof(md);
 		ca_subjectpubkey_digest(x509, md, &len);
-		log_debug("%s: %s", __func__, x509->name);
+		log_debug("%s: %s", __func__, X509_NAME_oneline
+				(X509_get_subject_name(x509), NULL, 0));
 
 		if (ibuf_add(env->sc_certreq, md, len) != 0) {
 			ibuf_release(env->sc_certreq);
@@ -626,13 +628,13 @@ ca_reload(struct iked *env)
 	}
 	closedir(dir);
 
-	h = store->ca_certs->objs;
+	h = X509_STORE_get0_objects(store->ca_certs);
 	for (i = 0; i < sk_X509_OBJECT_num(h); i++) {
 		xo = sk_X509_OBJECT_value(h, i);
-		if (xo->type != X509_LU_X509)
+		if (X509_OBJECT_get_type(xo) != X509_LU_X509)
 			continue;
 
-		x509 = xo->data.x509;
+		x509 = X509_OBJECT_get0_X509(xo);
 
 		(void)ca_validate_cert(env, NULL, x509, 0);
 	}
@@ -650,14 +652,14 @@ ca_by_subjectpubkey(X509_STORE *ctx, u_int8_t *sig, size_t siglen)
 	u_int			 len;
 	u_int8_t		 md[EVP_MAX_MD_SIZE];
 
-	h = ctx->objs;
+	h = X509_STORE_get0_objects(ctx);
 
 	for (i = 0; i < sk_X509_OBJECT_num(h); i++) {
 		xo = sk_X509_OBJECT_value(h, i);
-		if (xo->type != X509_LU_X509)
+		if (X509_OBJECT_get_type(xo) != X509_LU_X509)
 			continue;
 
-		ca = xo->data.x509;
+		ca = X509_OBJECT_get0_X509(xo);
 		len = sizeof(md);
 		ca_subjectpubkey_digest(ca, md, &len);
 
@@ -680,13 +682,13 @@ ca_by_issuer(X509_STORE *ctx, X509_NAME *subject, struct iked_static_id *id)
 	if (subject == NULL)
 		return (NULL);
 
-	h = ctx->objs;
+	h = X509_STORE_get0_objects(ctx);
 	for (i = 0; i < sk_X509_OBJECT_num(h); i++) {
 		xo = sk_X509_OBJECT_value(h, i);
-		if (xo->type != X509_LU_X509)
+		if (X509_OBJECT_get_type(xo) != X509_LU_X509)
 			continue;
 
-		cert = xo->data.x509;
+		cert = X509_OBJECT_get0_X509(xo);
 		if ((issuer = X509_get_issuer_name(cert)) == NULL)
 			continue;
 		else if (X509_NAME_cmp(subject, issuer) == 0) {
@@ -754,7 +756,7 @@ ca_key_serialize(EVP_PKEY *key, struct iked_id *id)
 	u_int8_t	*d;
 	RSA		*rsa;
 
-	switch (key->type) {
+	switch (EVP_PKEY_base_id(key)) {
 	case EVP_PKEY_RSA:
 		id->id_type = 0;
 		id->id_offset = 0;
@@ -776,7 +778,8 @@ ca_key_serialize(EVP_PKEY *key, struct iked_id *id)
 		id->id_type = IKEV2_CERT_RSA_KEY;
 		break;
 	default:
-		log_debug("%s: unsupported key type %d", __func__, key->type);
+		log_debug("%s: unsupported key type %d", __func__,
+				EVP_PKEY_base_id(key));
 		return (-1);
 	}
 
@@ -902,7 +905,7 @@ ca_validate_cert(struct iked *env, struct iked_static_id *id,
     void *data, size_t len)
 {
 	struct ca_store	*store = env->sc_priv;
-	X509_STORE_CTX	 csc;
+	X509_STORE_CTX	 *csc;
 	BIO		*rawcert = NULL;
 	X509		*cert = NULL;
 	int		 ret = -1, result, error;
@@ -961,16 +964,18 @@ ca_validate_cert(struct iked *env, struct iked_static_id *id,
 		}
 	}
 
-	bzero(&csc, sizeof(csc));
-	X509_STORE_CTX_init(&csc, store->ca_cas, cert, NULL);
-	if (store->ca_cas->param->flags & X509_V_FLAG_CRL_CHECK) {
-		X509_STORE_CTX_set_flags(&csc, X509_V_FLAG_CRL_CHECK);
-		X509_STORE_CTX_set_flags(&csc, X509_V_FLAG_CRL_CHECK_ALL);
+	csc = X509_STORE_CTX_new();
+	X509_STORE_CTX_init(csc, store->ca_cas, cert, NULL);
+	if (X509_VERIFY_PARAM_get_flags(X509_STORE_get0_param(store->ca_cas)) &
+	    X509_V_FLAG_CRL_CHECK) {
+		X509_STORE_CTX_set_flags(csc, X509_V_FLAG_CRL_CHECK);
+		X509_STORE_CTX_set_flags(csc, X509_V_FLAG_CRL_CHECK_ALL);
 	}
 
-	result = X509_verify_cert(&csc);
-	error = csc.error;
-	X509_STORE_CTX_cleanup(&csc);
+	result = X509_verify_cert(csc);
+	error = X509_STORE_CTX_get_error(csc);
+	X509_STORE_CTX_cleanup(csc);
+	X509_STORE_CTX_free(csc);
 	if (error != 0) {
 		errstr = X509_verify_cert_error_string(error);
 		goto done;
@@ -987,7 +992,8 @@ ca_validate_cert(struct iked *env, struct iked_static_id *id,
 
  done:
 	if (cert != NULL)
-		log_debug("%s: %s %.100s", __func__, cert->name,
+		log_debug("%s: %s %.100s", __func__, X509_NAME_oneline
+				(X509_get_subject_name(cert), NULL, 0),
 		    ret == 0 ? "ok" : errstr);
 
 	if (idname != NULL)
@@ -1036,8 +1042,9 @@ int
 ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
 {
 	X509_EXTENSION	*san;
-	u_int8_t	 sanhdr[4], *data;
-	int		 ext, santype, sanlen;
+	u_int8_t	 sanhdr[4];
+	unsigned char	*data;
+	int		 ext, santype, sanlen, sanvlen;
 	char		 idstr[IKED_ID_SIZE];
 
 	if ((ext = X509_get_ext_by_NID(cert,
@@ -1048,20 +1055,25 @@ ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
 		return (-1);
 	}
 
-	if (san->value == NULL || san->value->data == NULL ||
+/*	if (san->value == NULL || san->value->data == NULL ||
 	    san->value->length < (int)sizeof(sanhdr)) {
 		log_debug("%s: invalid subjectAltName in certificate",
 		    __func__);
 		return (-1);
-	}
+	}*/
 
-	/* This is partially based on isakmpd's x509 subjectaltname code */
-	data = (u_int8_t *)san->value->data;
+	const ASN1_STRING *asn1_data = X509_EXTENSION_get_data(san);
+	sanvlen = ASN1_STRING_to_UTF8(&data, asn1_data);
+	if (asn1_data == NULL || data == NULL || sanvlen < 0) {
+		log_debug("%s: invalid subjectAltName in certificate",
+		    __func__);
+		return (-1);
+	}
 	memcpy(&sanhdr, data, sizeof(sanhdr));
 	santype = sanhdr[2] & 0x3f;
 	sanlen = sanhdr[3];
 
-	if ((sanlen + (int)sizeof(sanhdr)) > san->value->length) {
+	if ((sanlen + (int)sizeof(sanhdr)) > sanvlen) {
 		log_debug("%s: invalid subjectAltName length", __func__);
 		return (-1);
 	}
@@ -1099,7 +1111,7 @@ ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
 
 	ikev2_print_id(id, idstr, sizeof(idstr));
 	log_debug("%s: %s", __func__, idstr);
-
+	OPENSSL_free(data);
 	return (0);
 }
 

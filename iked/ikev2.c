@@ -1301,7 +1301,7 @@ ssize_t
 ikev2_nat_detection(struct iked *env, struct iked_message *msg,
     void *ptr, size_t len, u_int type)
 {
-	EVP_MD_CTX		 ctx;
+	EVP_MD_CTX		*ctx = EVP_MD_CTX_new();
 	struct ike_header	*hdr;
 	u_int8_t		 md[SHA_DIGEST_LENGTH];
 	u_int			 mdlen = sizeof(md);
@@ -1335,8 +1335,8 @@ ikev2_nat_detection(struct iked *env, struct iked_message *msg,
 		dst = &msg->msg_peer;
 	}
 
-	EVP_MD_CTX_init(&ctx);
-	EVP_DigestInit_ex(&ctx, EVP_sha1(), NULL);
+	EVP_MD_CTX_init(ctx);
+	EVP_DigestInit_ex(ctx, EVP_sha1(), NULL);
 
 	switch (type) {
 	case IKEV2_N_NAT_DETECTION_SOURCE_IP:
@@ -1359,22 +1359,22 @@ ikev2_nat_detection(struct iked *env, struct iked_message *msg,
 		goto done;
 	}
 
-	EVP_DigestUpdate(&ctx, &ispi, sizeof(ispi));
-	EVP_DigestUpdate(&ctx, &rspi, sizeof(rspi));
+	EVP_DigestUpdate(ctx, &ispi, sizeof(ispi));
+	EVP_DigestUpdate(ctx, &rspi, sizeof(rspi));
 
 	switch (ss->ss_family) {
 	case AF_INET:
 		in4 = (struct sockaddr_in *)ss;
-		EVP_DigestUpdate(&ctx, &in4->sin_addr.s_addr,
+		EVP_DigestUpdate(ctx, &in4->sin_addr.s_addr,
 		    sizeof(in4->sin_addr.s_addr));
-		EVP_DigestUpdate(&ctx, &in4->sin_port,
+		EVP_DigestUpdate(ctx, &in4->sin_port,
 		    sizeof(in4->sin_port));
 		break;
 	case AF_INET6:
 		in6 = (struct sockaddr_in6 *)ss;
-		EVP_DigestUpdate(&ctx, &in6->sin6_addr.s6_addr,
+		EVP_DigestUpdate(ctx, &in6->sin6_addr.s6_addr,
 		    sizeof(in6->sin6_addr.s6_addr));
-		EVP_DigestUpdate(&ctx, &in6->sin6_port,
+		EVP_DigestUpdate(ctx, &in6->sin6_port,
 		    sizeof(in6->sin6_port));
 		break;
 	default:
@@ -1384,10 +1384,10 @@ ikev2_nat_detection(struct iked *env, struct iked_message *msg,
 	if (env->sc_opts & IKED_OPT_NATT) {
 		/* Enforce NAT-T/UDP-encapsulation by distorting the digest */
 		rnd = arc4random();
-		EVP_DigestUpdate(&ctx, &rnd, sizeof(rnd));
+		EVP_DigestUpdate(ctx, &rnd, sizeof(rnd));
 	}
 
-	EVP_DigestFinal_ex(&ctx, md, &mdlen);
+	EVP_DigestFinal_ex(ctx, md, &mdlen);
 
 	if (len < mdlen)
 		goto done;
@@ -1395,7 +1395,7 @@ ikev2_nat_detection(struct iked *env, struct iked_message *msg,
 	memcpy(ptr, md, mdlen);
 	ret = mdlen;
  done:
-	EVP_MD_CTX_cleanup(&ctx);
+	EVP_MD_CTX_free(ctx);
 
 	return (ret);
 }

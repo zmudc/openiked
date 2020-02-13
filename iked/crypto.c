@@ -145,13 +145,13 @@ hash_new(u_int8_t type, u_int16_t id)
 	hash->hash_length = length;
 	hash->hash_fixedkey = fixedkey;
 
-	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
+	if ((ctx = HMAC_CTX_new()) == NULL) {
 		log_debug("%s: alloc hash ctx", __func__);
 		hash_free(hash);
 		return (NULL);
 	}
 
-	HMAC_CTX_init(ctx);
+	HMAC_Init_ex(ctx, NULL, fixedkey, md, NULL);
 	hash->hash_ctx = ctx;
 
 	return (hash);
@@ -173,10 +173,8 @@ hash_free(struct iked_hash *hash)
 {
 	if (hash == NULL)
 		return;
-	if (hash->hash_ctx != NULL) {
-		HMAC_CTX_cleanup(hash->hash_ctx);
-		free(hash->hash_ctx);
-	}
+	if (hash->hash_ctx != NULL)
+		HMAC_CTX_free(hash->hash_ctx);
 	ibuf_release(hash->hash_key);
 	free(hash);
 }
@@ -299,7 +297,7 @@ cipher_new(u_int8_t type, u_int16_t id, u_int16_t id_length)
 	encr->encr_fixedkey = fixedkey;
 	encr->encr_ivlength = ivlength ? ivlength : length;
 
-	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
+	if ((ctx = EVP_CIPHER_CTX_new()) == NULL) {
 		log_debug("%s: alloc cipher ctx", __func__);
 		cipher_free(encr);
 		return (NULL);
@@ -459,7 +457,7 @@ dsa_new(u_int16_t id, struct iked_hash *prf, int sign)
 		dsa.dsa_hmac = 1;
 		break;
 	case IKEV2_AUTH_DSS_SIG:
-		dsa.dsa_priv = EVP_dss1();
+		dsa.dsa_priv = EVP_sha1();
 		break;
 	case IKEV2_AUTH_ECDSA_256:
 		dsa.dsa_priv = EVP_sha256();
@@ -487,12 +485,13 @@ dsa_new(u_int16_t id, struct iked_hash *prf, int sign)
 	dsap->dsa_sign = sign;
 
 	if (dsap->dsa_hmac) {
-		if ((dsap->dsa_ctx = calloc(1, sizeof(HMAC_CTX))) == NULL) {
+		if ((dsap->dsa_ctx = HMAC_CTX_new()) == NULL) {
 			log_debug("%s: alloc hash ctx", __func__);
 			dsa_free(dsap);
 			return (NULL);
 		}
-		HMAC_CTX_init((HMAC_CTX *)dsap->dsa_ctx);
+		HMAC_Init_ex((HMAC_CTX *)dsap->dsa_ctx, NULL, 0,
+				dsa.dsa_priv, NULL);
 	} else {
 		if ((dsap->dsa_ctx = EVP_MD_CTX_create()) == NULL) {
 			log_debug("%s: alloc digest ctx", __func__);
@@ -522,8 +521,7 @@ dsa_free(struct iked_dsa *dsa)
 	if (dsa == NULL)
 		return;
 	if (dsa->dsa_hmac) {
-		HMAC_CTX_cleanup((HMAC_CTX *)dsa->dsa_ctx);
-		free(dsa->dsa_ctx);
+		HMAC_CTX_free((HMAC_CTX *)dsa->dsa_ctx);
 	} else {
 		EVP_MD_CTX_destroy((EVP_MD_CTX *)dsa->dsa_ctx);
 		if (dsa->dsa_key)
