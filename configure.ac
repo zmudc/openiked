@@ -1890,7 +1890,7 @@ AC_RUN_IFELSE(
 	if(fd == NULL)
 		exit(1);
 
-	if ((rc = fprintf(fd ,"%x (%s)\n", SSLeay(), SSLeay_version(SSLEAY_VERSION))) <0)
+	if ((rc = fprintf(fd ,"%x (%s)\n", OpenSSL_version_num(), OpenSSL_version(OPENSSL_VERSION))) <0)
 		exit(1);
 
 	exit(0);
@@ -1923,7 +1923,7 @@ AC_RUN_IFELSE(
 #include <string.h>
 #include <openssl/opensslv.h>
 	]], [[
-	exit(SSLeay() == OPENSSL_VERSION_NUMBER ? 0 : 1);
+	exit(OpenSSL_version_num() == OPENSSL_VERSION_NUMBER ? 0 : 1);
 	]])],
 	[
 		AC_MSG_RESULT([yes])
@@ -1951,7 +1951,7 @@ Also see contrib/findssl.sh for help identifying header/library mismatches.])
 AC_MSG_CHECKING([if programs using OpenSSL functions will link])
 AC_LINK_IFELSE(
 	[AC_LANG_PROGRAM([[ #include <openssl/evp.h> ]],
-	[[ SSLeay_add_all_algorithms(); ]])],
+	[[ OpenSSL_add_all_algorithms(); ]])],
 	[
 		AC_MSG_RESULT([yes])
 	],
@@ -1962,7 +1962,7 @@ AC_LINK_IFELSE(
 		AC_MSG_CHECKING([if programs using OpenSSL need -ldl])
 		AC_LINK_IFELSE(
 			[AC_LANG_PROGRAM([[ #include <openssl/evp.h> ]],
-			[[ SSLeay_add_all_algorithms(); ]])],
+			[[ OpenSSL_add_all_algorithms(); ]])],
 			[
 				AC_MSG_RESULT([yes])
 			],
@@ -2198,7 +2198,7 @@ AC_RUN_IFELSE(
 	if(fd == NULL)
 		return(1);
 
-	if ((rc = fprintf(fd ,"%s\n", _EVENT_VERSION)) <0)
+	if ((rc = fprintf(fd ,"%s\n", EVENT__VERSION)) <0)
 		return(1);
 
 	return(0);
