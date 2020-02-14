@@ -149,6 +149,7 @@ AC_CHECK_HEADERS([\
 	netinet/in_systm.h \
 	netinet/ip_ipsp.h \
 	netinet/tcp.h \
+	netinet/udp.h \
 	netinet6/ipsec.h \
 	netipsec/ipsec.h \
 	mach/mach_time.h \

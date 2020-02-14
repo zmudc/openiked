@@ -94,6 +94,10 @@
 #include <netinet/in.h>
 #endif
 
+#if defined (HAVE_NETINET_UDP_H)
+#include <netinet/udp.h>
+#endif
+
 #ifdef HAVE_NETDB_H
 # include <netdb.h>
 #endif

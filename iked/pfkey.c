@@ -656,7 +656,7 @@ pfkey_flow(int sd, u_int8_t satype, u_int8_t action, struct iked_flow *flow)
 }
 
 int
-pfkey_sa(int sd, u_int8_t satype, u_int8_t action, struct iked_childsa *sa)
+pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 {
 	struct sadb_msg		 smsg;
 	struct sadb_sa		 sadb;
@@ -672,14 +672,17 @@ pfkey_sa(int sd, u_int8_t satype, u_int8_t action, struct iked_childsa *sa)
 	struct sadb_x_sa2	 sa_2;
 #if defined(HAVE_APPLE_NATT)
 	struct sadb_sa_natt	 natt;
-#endif
-#endif
-	struct sockaddr_storage	 ssrc, sdst;
+#else
+	struct sadb_x_nat_t_type nat_type;
+	struct sadb_x_nat_t_port nat_sport, nat_dport;
+#endif /* HAVE_APPLE_NATT */
+#endif /* _OPENBSD_IPSEC_API_VERSION */
+	struct sockaddr_storage  ssrc, sdst;
 	struct sadb_ident	*sa_srcid, *sa_dstid;
 	struct iked_lifetime	*lt;
 	struct iked_policy	*pol;
 	struct iovec		 iov[IOV_CNT];
-	u_int32_t		 jitter;
+	uint32_t		 jitter;
 	int			 iov_cnt;
 
 	sa_srcid = sa_dstid = NULL;
@@ -734,11 +737,13 @@ pfkey_sa(int sd, u_int8_t satype, u_int8_t action, struct iked_childsa *sa)
 #endif
 
 	bzero(&sa_src, sizeof(sa_src));
-	sa_src.sadb_address_len = (sizeof(sa_src) + ROUNDUP(SS_LEN(&ssrc))) / 8;
+	sa_src.sadb_address_len =
+	    (sizeof(sa_src) + ROUNDUP(SS_LEN(&ssrc))) / 8;
 	sa_src.sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
 
 	bzero(&sa_dst, sizeof(sa_dst));
-	sa_dst.sadb_address_len = (sizeof(sa_dst) + ROUNDUP(SS_LEN(&sdst))) / 8;
+	sa_dst.sadb_address_len =
+	    (sizeof(sa_dst) + ROUNDUP(SS_LEN(&sdst))) / 8;
 	sa_dst.sadb_address_exttype = SADB_EXT_ADDRESS_DST;
 
 	bzero(&sa_authkey, sizeof(sa_authkey));
@@ -747,6 +752,8 @@ pfkey_sa(int sd, u_int8_t satype, u_int8_t action, struct iked_childsa *sa)
 	bzero(&udpencap, sizeof udpencap);
 #elif defined(HAVE_APPLE_NATT)
 	bzero(&natt, sizeof(natt));
+#else
+	bzero(&nat_type, sizeof(nat_type));
 #endif
 	bzero(&sa_ltime_hard, sizeof(sa_ltime_hard));
 	bzero(&sa_ltime_soft, sizeof(sa_ltime_soft));
@@ -784,7 +791,8 @@ pfkey_sa(int sd, u_int8_t satype, u_int8_t action, struct iked_childsa *sa)
 		return (-1);
 	}
 
-	if (sa->csa_ikesa->sa_udpencap && sa->csa_ikesa->sa_natt) {
+	if (satype == SADB_SATYPE_ESP &&
+	    sa->csa_ikesa->sa_udpencap && sa->csa_ikesa->sa_natt) {
 #if defined(_OPENBSD_IPSEC_API_VERSION)
 		sadb.sadb_sa_flags |= SADB_X_SAFLAGS_UDPENCAP;
 		udpencap.sadb_x_udpencap_exttype = SADB_X_EXT_UDPENCAP;
@@ -801,7 +809,27 @@ pfkey_sa(int sd, u_int8_t satype, u_int8_t action, struct iked_childsa *sa)
 		natt.sadb_sa_natt_port =
 		    ntohs(sa->csa_ikesa->sa_peer.addr_port);
 #else
-#warning PFKEYv2 NAT-T not supported
+	nat_type.sadb_x_nat_t_type_len = sizeof(nat_type) / 8;
+	nat_type.sadb_x_nat_t_type_exttype = SADB_X_EXT_NAT_T_TYPE;
+	nat_type.sadb_x_nat_t_type_type = UDP_ENCAP_ESPINUDP;
+	bzero(&nat_sport, sizeof(nat_sport));
+	nat_sport.sadb_x_nat_t_port_len = sizeof(nat_sport) / 8;
+	nat_sport.sadb_x_nat_t_port_exttype = SADB_X_EXT_NAT_T_SPORT;
+	nat_sport.sadb_x_nat_t_port_port =
+	    sa->csa_ikesa->sa_local.addr_port;
+	bzero(&nat_dport, sizeof(nat_dport));
+	nat_dport.sadb_x_nat_t_port_len = sizeof(nat_dport) / 8;
+	nat_dport.sadb_x_nat_t_port_exttype = SADB_X_EXT_NAT_T_DPORT;
+	nat_dport.sadb_x_nat_t_port_port =
+	    sa->csa_ikesa->sa_peer.addr_port;
+
+	log_debug("%s: NAT-T: type=%s (%d) sport=%d dport=%d",
+		    __func__,
+		    (nat_type.sadb_x_nat_t_type_type == UDP_ENCAP_ESPINUDP)
+		    ? "UDP encap" : "unknown",
+		    nat_type.sadb_x_nat_t_type_type,
+		    ntohs(nat_sport.sadb_x_nat_t_port_port),
+		    ntohs(nat_dport.sadb_x_nat_t_port_port));
 #endif
 		log_debug("%s: udpencap port %u", __func__,
 		    ntohs(sa->csa_ikesa->sa_peer.addr_port));
