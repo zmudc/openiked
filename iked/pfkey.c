@@ -565,9 +565,7 @@ pfkey_flow(int sd, u_int8_t satype, u_int8_t action, struct iked_flow *flow)
 		sa_ipsec.sadb_x_ipsecrequest_proto =
 		    satype == SADB_SATYPE_AH ? IPPROTO_AH : IPPROTO_ESP;
 		sa_ipsec.sadb_x_ipsecrequest_mode = IPSEC_MODE_TUNNEL; /* XXX */
-		sa_ipsec.sadb_x_ipsecrequest_level =
-		    flow->flow_dir == IPSEC_DIR_INBOUND ?
-		    IPSEC_LEVEL_USE : IPSEC_LEVEL_REQUIRE;
+		sa_ipsec.sadb_x_ipsecrequest_level = IPSEC_LEVEL_REQUIRE;
 	 	sa_ipsec.sadb_x_ipsecrequest_len = sizeof(sa_ipsec) +
 		    SS_LEN(&slocal) + SS_LEN(&speer);
 		padlen = ROUNDUP(sa_ipsec.sadb_x_ipsecrequest_len) -
@@ -965,6 +963,21 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		smsg.sadb_msg_len += udpencap.sadb_x_udpencap_len;
 		iov_cnt++;
 	}
+#elif !defined(HAVE_APPLE_NATT)
+	if (sa->csa_ikesa->sa_udpencap && sa->csa_ikesa->sa_natt) {
+		iov[iov_cnt].iov_base = &nat_type;
+		iov[iov_cnt].iov_len = sizeof(nat_type);
+		smsg.sadb_msg_len += nat_type.sadb_x_nat_t_type_len;
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &nat_sport;
+		iov[iov_cnt].iov_len = sizeof(nat_sport);
+		smsg.sadb_msg_len += nat_sport.sadb_x_nat_t_port_len;
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &nat_dport;
+		iov[iov_cnt].iov_len = sizeof(nat_dport);
+		smsg.sadb_msg_len += nat_dport.sadb_x_nat_t_port_len;
+		iov_cnt++;
+	}
 #endif
 
 	if (sa_enckey.sadb_key_len) {
@@ -990,14 +1003,14 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		iov_cnt++;
 	}
 
-	if (sa_srcid) {
+	if (0 && sa_srcid) {
 		/* src identity */
 		iov[iov_cnt].iov_base = sa_srcid;
 		iov[iov_cnt].iov_len = sa_srcid->sadb_ident_len * 8;
 		smsg.sadb_msg_len += sa_srcid->sadb_ident_len;
 		iov_cnt++;
 	}
-	if (sa_dstid) {
+	if (0 && sa_dstid) {
 		/* dst identity */
 		iov[iov_cnt].iov_base = sa_dstid;
 		iov[iov_cnt].iov_len = sa_dstid->sadb_ident_len * 8;
