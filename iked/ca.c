@@ -1044,7 +1044,7 @@ ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
 	X509_EXTENSION	*san;
 	u_int8_t	 sanhdr[4];
 	unsigned char	*data;
-	int		 ext, santype, sanlen, sanvlen;
+	int		 ext, santype, sanlen;
 	char		 idstr[IKED_ID_SIZE];
 
 	if ((ext = X509_get_ext_by_NID(cert,
@@ -1055,16 +1055,9 @@ ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
 		return (-1);
 	}
 
-/*	if (san->value == NULL || san->value->data == NULL ||
-	    san->value->length < (int)sizeof(sanhdr)) {
-		log_debug("%s: invalid subjectAltName in certificate",
-		    __func__);
-		return (-1);
-	}*/
-
 	const ASN1_STRING *asn1_data = X509_EXTENSION_get_data(san);
-	sanvlen = ASN1_STRING_to_UTF8(&data, asn1_data);
-	if (asn1_data == NULL || data == NULL || sanvlen < 0) {
+	data = asn1_data->data;
+	if (asn1_data == NULL || data == NULL) {
 		log_debug("%s: invalid subjectAltName in certificate",
 		    __func__);
 		return (-1);
@@ -1072,11 +1065,6 @@ ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
 	memcpy(&sanhdr, data, sizeof(sanhdr));
 	santype = sanhdr[2] & 0x3f;
 	sanlen = sanhdr[3];
-
-	if ((sanlen + (int)sizeof(sanhdr)) > sanvlen) {
-		log_debug("%s: invalid subjectAltName length", __func__);
-		return (-1);
-	}
 
 	switch (santype) {
 	case GEN_DNS:
