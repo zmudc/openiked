@@ -1,4 +1,4 @@
-/*	$OpenBSD: control.c,v 1.16 2015/01/16 06:39:58 deraadt Exp $	*/
+/*	$OpenBSD: control.c,v 1.26 2018/08/06 06:30:06 mestre Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -45,7 +45,31 @@ struct ctl_conn
 	*control_connbyfd(int);
 void	 control_close(int, struct control_sock *);
 void	 control_dispatch_imsg(int, short, void *);
+void	 control_dispatch_parent(int, short, void *);
 void	 control_imsg_forward(struct imsg *);
+void	 control_run(struct privsep *, struct privsep_proc *, void *);
+
+static struct privsep_proc procs[] = {
+	{ "parent",	PROC_PARENT, NULL }
+};
+
+pid_t
+control(struct privsep *ps, struct privsep_proc *p)
+{
+	return (proc_run(ps, p, procs, nitems(procs), control_run, NULL));
+}
+
+void
+control_run(struct privsep *ps, struct privsep_proc *p, void *arg)
+{
+	/*
+	 * pledge in the control process:
+	 * stdio - for malloc and basic I/O including events.
+	 * unix - for the control socket.
+	 */
+	if (pledge("stdio unix", NULL) == -1)
+		fatal("pledge");
+}
 
 int
 control_init(struct privsep *ps, struct control_sock *cs)
@@ -58,7 +82,7 @@ control_init(struct privsep *ps, struct control_sock *cs)
 	if (cs->cs_name == NULL)
 		return (0);
 
-	if ((fd = socket(AF_UNIX, SOCK_STREAM, 0)) == -1) {
+	if ((fd = socket(AF_UNIX, SOCK_STREAM | SOCK_NONBLOCK, 0)) == -1) {
 		log_warn("%s: socket", __func__);
 		return (-1);
 	}
@@ -101,7 +125,6 @@ control_init(struct privsep *ps, struct control_sock *cs)
 		return (-1);
 	}
 
-	socket_set_blockmode(fd, BM_NONBLOCK);
 	cs->cs_fd = fd;
 	cs->cs_env = env;
 
@@ -127,16 +150,6 @@ control_listen(struct control_sock *cs)
 	return (0);
 }
 
-void
-control_cleanup(struct control_sock *cs)
-{
-	if (cs->cs_name == NULL)
-		return;
-	event_del(&cs->cs_ev);
-	event_del(&cs->cs_evt);
-	(void)unlink(cs->cs_name);
-}
-
 /* ARGSUSED */
 void
 control_accept(int listenfd, short event, void *arg)
@@ -152,8 +165,8 @@ control_accept(int listenfd, short event, void *arg)
 		return;
 
 	len = sizeof(sun);
-	if ((connfd = accept(listenfd,
-	    (struct sockaddr *)&sun, &len)) == -1) {
+	if ((connfd = accept4(listenfd,
+	    (struct sockaddr *)&sun, &len, SOCK_NONBLOCK)) == -1) {
 		/*
 		 * Pause accept if we are out of file descriptors, or
 		 * libevent will haunt us here too.
@@ -168,8 +181,6 @@ control_accept(int listenfd, short event, void *arg)
 			log_warn("%s: accept", __func__);
 		return;
 	}
-
-	socket_set_blockmode(connfd, BM_NONBLOCK);
 
 	if ((c = calloc(1, sizeof(struct ctl_conn))) == NULL) {
 		log_warn("%s", __func__);
@@ -193,9 +204,10 @@ control_connbyfd(int fd)
 {
 	struct ctl_conn	*c;
 
-	for (c = TAILQ_FIRST(&ctl_conns); c != NULL && c->iev.ibuf.fd != fd;
-	    c = TAILQ_NEXT(c, entry))
-		;	/* nothing */
+	TAILQ_FOREACH(c, &ctl_conns, entry) {
+		if (c->iev.ibuf.fd == fd)
+			break;
+	}
 
 	return (c);
 }
@@ -241,7 +253,8 @@ control_dispatch_imsg(int fd, short event, void *arg)
 	}
 
 	if (event & EV_READ) {
-		if ((n = imsg_read(&c->iev.ibuf)) == -1 || n == 0) {
+		if (((n = imsg_read(&c->iev.ibuf)) == -1 && errno != EAGAIN) ||
+		    n == 0) {
 			control_close(fd, cs);
 			return;
 		}
@@ -280,11 +293,9 @@ control_dispatch_imsg(int fd, short event, void *arg)
 			IMSG_SIZE_CHECK(&imsg, &v);
 
 			memcpy(&v, imsg.data, sizeof(v));
-			log_verbose(v);
+			log_setverbose(v);
 
 			proc_forward_imsg(&env->sc_ps, &imsg, PROC_PARENT, -1);
-			proc_forward_imsg(&env->sc_ps, &imsg, PROC_IKEV2, -1);
-			proc_forward_imsg(&env->sc_ps, &imsg, PROC_IKEV1, -1);
 			break;
 		case IMSG_CTL_RELOAD:
 		case IMSG_CTL_RESET:
@@ -312,7 +323,7 @@ control_imsg_forward(struct imsg *imsg)
 
 	TAILQ_FOREACH(c, &ctl_conns, entry)
 		if (c->flags & CTL_CONN_NOTIFY)
-			imsg_compose(&c->iev.ibuf, imsg->hdr.type,
+			imsg_compose_event(&c->iev, imsg->hdr.type,
 			    0, imsg->hdr.pid, -1, imsg->data,
 			    imsg->hdr.len - IMSG_HEADER_SIZE);
 }

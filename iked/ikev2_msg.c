@@ -1,6 +1,7 @@
-/*	$OpenBSD: ikev2_msg.c,v 1.43 2015/08/21 11:59:27 reyk Exp $	*/
+/*	$OpenBSD: ikev2_msg.c,v 1.62 2020/01/22 07:52:37 deraadt Exp $	*/
 
 /*
+ * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
  *
  * Permission to use, copy, modify, and distribute this software for any
@@ -43,8 +44,12 @@
 #include "eap.h"
 #include "dh.h"
 
+void	 ikev1_recv(struct iked *, struct iked_message *);
 void	 ikev2_msg_response_timeout(struct iked *, void *);
 void	 ikev2_msg_retransmit_timeout(struct iked *, void *);
+int	 ikev2_check_frag_oversize(struct iked_sa *sa, struct ibuf *buf);
+int	 ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
+	    struct ibuf *in,uint8_t exchange, uint8_t firstpayload, int response);
 
 void
 ikev2_msg_cb(int fd, short event, void *arg)
@@ -57,7 +62,6 @@ ikev2_msg_cb(int fd, short event, void *arg)
 	uint8_t			 buf[IKED_MSGBUF_MAX];
 	ssize_t			 len;
 	off_t			 off;
-	struct iovec		 iov[2];
 
 	bzero(&msg, sizeof(msg));
 	bzero(buf, sizeof(buf));
@@ -74,7 +78,7 @@ ikev2_msg_cb(int fd, short event, void *arg)
 		return;
 
 	if (socket_getport((struct sockaddr *)&msg.msg_local) ==
-	    IKED_NATT_PORT) {
+	    env->sc_nattport) {
 		if (memcmp(&natt, buf, sizeof(natt)) != 0)
 			return;
 		msg.msg_natt = 1;
@@ -89,23 +93,43 @@ ikev2_msg_cb(int fd, short event, void *arg)
 	if ((msg.msg_data = ibuf_new(buf + off, len - off)) == NULL)
 		return;
 
-	if (hdr.ike_version == IKEV1_VERSION) {
-		iov[0].iov_base = &msg;
-		iov[0].iov_len = sizeof(msg);
-		iov[1].iov_base = buf;
-		iov[1].iov_len = len;
-
-		proc_composev_imsg(&env->sc_ps, PROC_IKEV1, -1,
-		    IMSG_IKE_MESSAGE, -1, iov, 2);
-		goto done;
-	}
 	TAILQ_INIT(&msg.msg_proposals);
-
+	SLIST_INIT(&msg.msg_certreqs);
 	msg.msg_fd = fd;
-	ikev2_recv(env, &msg);
 
- done:
+	if (hdr.ike_version == IKEV1_VERSION)
+		ikev1_recv(env, &msg);
+	else
+		ikev2_recv(env, &msg);
+
 	ikev2_msg_cleanup(env, &msg);
+}
+
+void
+ikev1_recv(struct iked *env, struct iked_message *msg)
+{
+	struct ike_header	*hdr;
+
+	if (ibuf_size(msg->msg_data) <= sizeof(*hdr)) {
+		log_debug("%s: short message", __func__);
+		return;
+	}
+
+	hdr = (struct ike_header *)ibuf_data(msg->msg_data);
+
+	log_debug("%s: header ispi %s rspi %s"
+	    " nextpayload %u version 0x%02x exchange %u flags 0x%02x"
+	    " msgid %u length %u", __func__,
+	    print_spi(betoh64(hdr->ike_ispi), 8),
+	    print_spi(betoh64(hdr->ike_rspi), 8),
+	    hdr->ike_nextpayload,
+	    hdr->ike_version,
+	    hdr->ike_exchange,
+	    hdr->ike_flags,
+	    betoh32(hdr->ike_msgid),
+	    betoh32(hdr->ike_length));
+
+	log_debug("%s: IKEv1 not supported", __func__);
 }
 
 struct ibuf *
@@ -158,14 +182,31 @@ ikev2_msg_copy(struct iked *env, struct iked_message *msg)
 void
 ikev2_msg_cleanup(struct iked *env, struct iked_message *msg)
 {
+	struct iked_certreq	*cr;
+
 	if (msg == msg->msg_parent) {
 		ibuf_release(msg->msg_nonce);
 		ibuf_release(msg->msg_ke);
 		ibuf_release(msg->msg_auth.id_buf);
 		ibuf_release(msg->msg_id.id_buf);
 		ibuf_release(msg->msg_cert.id_buf);
+		ibuf_release(msg->msg_cookie);
+		ibuf_release(msg->msg_cookie2);
+
+		msg->msg_nonce = NULL;
+		msg->msg_ke = NULL;
+		msg->msg_auth.id_buf = NULL;
+		msg->msg_id.id_buf = NULL;
+		msg->msg_cert.id_buf = NULL;
+		msg->msg_cookie = NULL;
+		msg->msg_cookie2 = NULL;
 
 		config_free_proposals(&msg->msg_proposals, 0);
+		while ((cr = SLIST_FIRST(&msg->msg_certreqs))) {
+			ibuf_release(cr->cr_data);
+			SLIST_REMOVE_HEAD(&msg->msg_certreqs, cr_entry);
+			free(cr);
+		}
 	}
 
 	if (msg->msg_data != NULL) {
@@ -189,6 +230,8 @@ ikev2_msg_valid_ike_sa(struct iked *env, struct ike_header *oldhdr,
 #endif
 
 	if (msg->msg_sa != NULL && msg->msg_policy != NULL) {
+		if (msg->msg_sa->sa_state == IKEV2_STATE_CLOSED)
+			return (-1);
 		/*
 		 * Only permit informational requests from initiator
 		 * on closing SAs (for DELETE).
@@ -280,16 +323,17 @@ ikev2_msg_send(struct iked *env, struct iked_message *msg)
 	    msg->msg_offset, sizeof(*hdr))) == NULL)
 		return (-1);
 
-	isnatt = (msg->msg_natt || (msg->msg_sa && msg->msg_sa->sa_natt));
+	isnatt = (msg->msg_natt || (sa && sa->sa_natt));
 
 	exchange = hdr->ike_exchange;
 	flags = hdr->ike_flags;
-	log_info("%s: %s %s from %s to %s msgid %u, %ld bytes%s", __func__,
+	log_info("%ssend %s %s %u peer %s local %s, %ld bytes%s",
+	    SPI_IH(hdr),
 	    print_map(exchange, ikev2_exchange_map),
-	    (flags & IKEV2_FLAG_RESPONSE) ? "response" : "request",
-	    print_host((struct sockaddr *)&msg->msg_local, NULL, 0),
-	    print_host((struct sockaddr *)&msg->msg_peer, NULL, 0),
+	    (flags & IKEV2_FLAG_RESPONSE) ? "res" : "req",
 	    betoh32(hdr->ike_msgid),
+	    print_host((struct sockaddr *)&msg->msg_peer, NULL, 0),
+	    print_host((struct sockaddr *)&msg->msg_local, NULL, 0),
 	    ibuf_length(buf), isnatt ? ", NAT-T" : "");
 
 	if (isnatt) {
@@ -297,16 +341,25 @@ ikev2_msg_send(struct iked *env, struct iked_message *msg)
 			log_debug("%s: failed to set NAT-T", __func__);
 			return (-1);
 		}
-		msg->msg_offset += sizeof(natt);
 	}
 
-	if ((sendto(msg->msg_fd, ibuf_data(buf), ibuf_size(buf), 0,
-	    (struct sockaddr *)&msg->msg_peer, msg->msg_peerlen)) == -1) {
-		log_warn("%s: sendto", __func__);
-		return (-1);
+	if (sendtofrom(msg->msg_fd, ibuf_data(buf), ibuf_size(buf), 0,
+	    (struct sockaddr *)&msg->msg_peer, msg->msg_peerlen,
+	    (struct sockaddr *)&msg->msg_local, msg->msg_locallen) == -1) {
+		log_warn("%s: sendtofrom", __func__);
+		if (sa != NULL && errno == EADDRNOTAVAIL) {
+			sa_state(env, sa, IKEV2_STATE_CLOSING);
+			timer_del(env, &sa->sa_timer);
+			timer_set(env, &sa->sa_timer,
+			    ikev2_ike_sa_timeout, sa);
+			timer_add(env, &sa->sa_timer,
+			    IKED_IKE_SA_DELETE_TIMEOUT);
+		}
+		if (sa != NULL)
+			return (-1);
 	}
 
-	if (!sa)
+	if (sa == NULL)
 		return (0);
 
 	if ((m = ikev2_msg_copy(env, msg)) == NULL) {
@@ -577,7 +630,8 @@ ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
 	    __func__, outlen, encrlen, pad);
 	print_hex(ibuf_data(out), 0, ibuf_size(out));
 
-	if (ibuf_setsize(out, outlen) != 0)
+	/* Strip padding and padding length */
+	if (ibuf_setsize(out, outlen - pad - 1) != 0)
 		goto done;
 
 	ibuf_release(src);
@@ -590,6 +644,26 @@ ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
 }
 
 int
+ikev2_check_frag_oversize(struct iked_sa *sa, struct ibuf *buf) {
+	size_t		len = ibuf_length(buf);
+	sa_family_t	sa_fam;
+	size_t		max;
+	size_t		ivlen, integrlen, blocklen;
+
+	sa_fam = ((struct sockaddr *)&sa->sa_local.addr)->sa_family;
+
+	max = sa_fam == AF_INET ? IKEV2_MAXLEN_IPV4_FRAG
+	    : IKEV2_MAXLEN_IPV6_FRAG;
+
+	blocklen = cipher_length(sa->sa_encr);
+	ivlen = cipher_ivlength(sa->sa_encr);
+	integrlen = hash_length(sa->sa_integr);
+
+	/* Estimated maximum packet size (with 0 < padding < blocklen) */
+	return ((len + ivlen + blocklen + integrlen) >= max) && sa->sa_frag;
+}
+
+int
 ikev2_msg_send_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf **ep,
     uint8_t exchange, uint8_t firstpayload, int response)
 {
@@ -599,12 +673,18 @@ ikev2_msg_send_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf **ep,
 	struct ibuf			*buf, *e = *ep;
 	int				 ret = -1;
 
+	/* Check if msg needs to be fragmented */
+	if (ikev2_check_frag_oversize(sa, e)) {
+		return ikev2_send_encrypted_fragments(env, sa, e, exchange,
+		    firstpayload, response);
+	}
+
 	if ((buf = ikev2_msg_init(env, &resp, &sa->sa_peer.addr,
 	    sa->sa_peer.addr.ss_len, &sa->sa_local.addr,
 	    sa->sa_local.addr.ss_len, response)) == NULL)
 		goto done;
 
-	resp.msg_msgid = response ? sa->sa_msgid : ikev2_msg_id(env, sa);
+	resp.msg_msgid = response ? sa->sa_msgid_current : ikev2_msg_id(env, sa);
 
 	/* IKE header */
 	if ((hdr = ikev2_add_header(buf, sa, resp.msg_msgid, IKEV2_PAYLOAD_SK,
@@ -648,6 +728,123 @@ ikev2_msg_send_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf **ep,
 	ikev2_msg_cleanup(env, &resp);
 
 	return (ret);
+}
+
+int
+ikev2_send_encrypted_fragments(struct iked *env, struct iked_sa *sa,
+    struct ibuf *in, uint8_t exchange, uint8_t firstpayload, int response) {
+	struct iked_message		 resp;
+	struct ibuf			*buf, *e;
+	struct ike_header		*hdr;
+	struct ikev2_payload		*pld;
+	struct ikev2_frag_payload	*frag;
+	sa_family_t			 sa_fam;
+	size_t				 ivlen, integrlen, blocklen;
+	size_t 				 max_len, left,  offset=0;
+	size_t				 frag_num = 1, frag_total;
+	uint8_t				*data;
+	uint32_t			 msgid;
+	int 				 ret = -1;
+
+	sa_fam = ((struct sockaddr *)&sa->sa_local.addr)->sa_family;
+
+	left = ibuf_length(in);
+
+	/* Calculate max allowed size of a fragments payload */
+	blocklen = cipher_length(sa->sa_encr);
+	ivlen = cipher_ivlength(sa->sa_encr);
+	integrlen = hash_length(sa->sa_integr);
+	max_len = (sa_fam == AF_INET ? IKEV2_MAXLEN_IPV4_FRAG
+	    : IKEV2_MAXLEN_IPV6_FRAG)
+                  - ivlen - blocklen - integrlen;
+
+	/* Total number of fragments to send */
+	frag_total = (left / max_len) + 1;
+
+	msgid = response ? sa->sa_msgid_current : ikev2_msg_id(env, sa);
+
+	while (frag_num <= frag_total) {
+		if ((buf = ikev2_msg_init(env, &resp, &sa->sa_peer.addr,
+		    sa->sa_peer.addr.ss_len, &sa->sa_local.addr,
+		    sa->sa_local.addr.ss_len, response)) == NULL)
+			goto done;
+
+		resp.msg_msgid = msgid;
+
+		/* IKE header */
+		if ((hdr = ikev2_add_header(buf, sa, resp.msg_msgid,
+		    IKEV2_PAYLOAD_SKF, exchange, response ? IKEV2_FLAG_RESPONSE
+		        : 0)) == NULL)
+			goto done;
+
+		/* Payload header */
+		if ((pld = ikev2_add_payload(buf)) == NULL)
+			goto done;
+
+		/* Fragment header */
+		if ((frag = ibuf_advance(buf, sizeof(*frag))) == NULL) {
+			log_debug("%s: failed to add SKF fragment header",
+			    __func__);
+			goto done;
+		}
+		frag->frag_num = htobe16(frag_num);
+		frag->frag_total = htobe16(frag_total);
+
+		/* Encrypt message and add as an E payload */
+		data = ibuf_seek(in, offset, 0);
+		if((e=ibuf_new(data, MIN(left, max_len))) == NULL) {
+			goto done;
+		}
+		if ((e = ikev2_msg_encrypt(env, sa, e)) == NULL) {
+			log_debug("%s: encryption failed", __func__);
+			goto done;
+		}
+		if (ibuf_cat(buf, e) != 0)
+			goto done;
+
+		if (ikev2_next_payload(pld, ibuf_size(e) + sizeof(*frag),
+		    firstpayload) == -1)
+			goto done;
+
+		if (ikev2_set_header(hdr, ibuf_size(buf) - sizeof(*hdr)) == -1)
+			goto done;
+
+		/* Add integrity checksum (HMAC) */
+		if (ikev2_msg_integr(env, sa, buf) != 0) {
+			log_debug("%s: integrity checksum failed", __func__);
+			goto done;
+		}
+
+		log_debug("%s: Fragment %zu of %zu has size of %zu bytes.",
+		    __func__, frag_num, frag_total,
+		    ibuf_size(buf) - sizeof(*hdr));
+		print_hex(ibuf_data(buf), 0,  ibuf_size(buf));
+
+		resp.msg_data = buf;
+		resp.msg_sa = sa;
+		resp.msg_fd = sa->sa_fd;
+		TAILQ_INIT(&resp.msg_proposals);
+
+		if (ikev2_msg_send(env, &resp) == -1)
+			goto done;
+
+		offset += MIN(left, max_len);
+		left -= MIN(left, max_len);
+		frag_num++;
+
+		/* MUST be zero after first fragment */
+		firstpayload = 0;
+
+		ikev2_msg_cleanup(env, &resp);
+		ibuf_release(e);
+		e = NULL;
+	}
+
+	return 0;
+done:
+	ikev2_msg_cleanup(env, &resp);
+	ibuf_release(e);
+	return ret;
 }
 
 struct ibuf *
@@ -777,8 +974,7 @@ ikev2_msg_authverify(struct iked *env, struct iked_sa *sa,
 	}
 
  done:
-	if (psk != NULL)
-		free(psk);
+	free(psk);
 	dsa_free(dsa);
 
 	return (ret);
@@ -789,7 +985,7 @@ ikev2_msg_authsign(struct iked *env, struct iked_sa *sa,
     struct iked_auth *auth, struct ibuf *authmsg)
 {
 	uint8_t				*key, *psk = NULL;
-	ssize_t				 keylen;
+	ssize_t				 keylen, siglen;
 	struct iked_hash		*prf = sa->sa_prf;
 	struct iked_id			*id;
 	struct iked_dsa			*dsa = NULL;
@@ -847,9 +1043,16 @@ ikev2_msg_authsign(struct iked *env, struct iked_sa *sa,
 		goto done;
 	}
 
-	if ((ret = dsa_sign_final(dsa,
-	    ibuf_data(buf), ibuf_size(buf))) == -1) {
+	if ((siglen = dsa_sign_final(dsa,
+	    ibuf_data(buf), ibuf_size(buf))) < 0) {
 		log_debug("%s: failed to create auth signature", __func__);
+		ibuf_release(buf);
+		goto done;
+	}
+
+	if (ibuf_setsize(buf, siglen) < 0) {
+		log_debug("%s: failed to set auth signature size to %zd",
+		    __func__, siglen);
 		ibuf_release(buf);
 		goto done;
 	}
@@ -859,8 +1062,7 @@ ikev2_msg_authsign(struct iked *env, struct iked_sa *sa,
 
 	ret = 0;
  done:
-	if (psk != NULL)
-		free(psk);
+	free(psk);
 	dsa_free(dsa);
 
 	return (ret);
@@ -948,14 +1150,50 @@ ikev2_msg_lookup(struct iked *env, struct iked_msgqueue *queue,
 	return (m);
 }
 
+void
+ikev2_msg_lookup_dispose_all(struct iked *env, struct iked_msgqueue *queue,
+    struct iked_message *msg, struct ike_header *hdr)
+{
+	struct iked_message	*m = NULL, *tmp = NULL;
+
+	TAILQ_FOREACH_SAFE(m, queue, msg_entry, tmp) {
+		if (m->msg_msgid == msg->msg_msgid &&
+		    m->msg_exchange == hdr->ike_exchange) {
+			TAILQ_REMOVE(queue, m, msg_entry);
+			timer_del(env, &m->msg_timer);
+			ikev2_msg_cleanup(env, m);
+			free(m);
+		}
+	}
+}
+
+int
+ikev2_msg_lookup_retransmit_all(struct iked *env, struct iked_msgqueue *queue,
+    struct iked_message *msg, struct ike_header *hdr, struct iked_sa *sa)
+{
+	struct iked_message	*m = NULL, *tmp = NULL;
+	int count = 0;
+
+	TAILQ_FOREACH_SAFE(m, queue, msg_entry, tmp) {
+		if (m->msg_msgid == msg->msg_msgid &&
+		    m->msg_exchange == hdr->ike_exchange) {
+			if (ikev2_msg_retransmit_response(env, sa, m))
+				return -1;
+			count++;
+		}
+	}
+	return count;
+}
+
 int
 ikev2_msg_retransmit_response(struct iked *env, struct iked_sa *sa,
     struct iked_message *msg)
 {
-	if ((sendto(msg->msg_fd, ibuf_data(msg->msg_data),
-	    ibuf_size(msg->msg_data), 0, (struct sockaddr *)&msg->msg_peer,
-	    msg->msg_peerlen)) == -1) {
-		log_warn("%s: sendto", __func__);
+	if (sendtofrom(msg->msg_fd, ibuf_data(msg->msg_data),
+	    ibuf_size(msg->msg_data), 0,
+	    (struct sockaddr *)&msg->msg_peer, msg->msg_peerlen,
+	    (struct sockaddr *)&msg->msg_local, msg->msg_locallen) == -1) {
+		log_warn("%s: sendtofrom", __func__);
 		return (-1);
 	}
 
@@ -979,11 +1217,13 @@ ikev2_msg_retransmit_timeout(struct iked *env, void *arg)
 	struct iked_sa		*sa = msg->msg_sa;
 
 	if (msg->msg_tries < IKED_RETRANSMIT_TRIES) {
-		if ((sendto(msg->msg_fd, ibuf_data(msg->msg_data),
+		if (sendtofrom(msg->msg_fd, ibuf_data(msg->msg_data),
 		    ibuf_size(msg->msg_data), 0,
-		    (struct sockaddr *)&msg->msg_peer,
-		    msg->msg_peerlen)) == -1) {
-			log_warn("%s: sendto", __func__);
+		    (struct sockaddr *)&msg->msg_peer, msg->msg_peerlen,
+		    (struct sockaddr *)&msg->msg_local,
+		    msg->msg_locallen) == -1) {
+			log_warn("%s: sendtofrom", __func__);
+			ikev2_ike_sa_setreason(sa, "retransmit failed");
 			sa_free(env, sa);
 			return;
 		}
@@ -993,6 +1233,7 @@ ikev2_msg_retransmit_timeout(struct iked *env, void *arg)
 	} else {
 		log_debug("%s: retransmit limit reached for msgid %u",
 		    __func__, msg->msg_msgid);
+		ikev2_ike_sa_setreason(sa, "retransmit limit reached");
 		sa_free(env, sa);
 	}
 }

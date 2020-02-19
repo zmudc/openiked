@@ -1,4 +1,4 @@
-/*	$OpenBSD: ca.c,v 1.37 2015/10/01 10:59:23 reyk Exp $	*/
+/*	$OpenBSD: ca.c,v 1.50 2020/01/15 21:47:57 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -46,7 +46,8 @@
 #include "iked.h"
 #include "ikev2.h"
 
-void	 ca_reset(struct privsep *, struct privsep_proc *, void *);
+void	 ca_run(struct privsep *, struct privsep_proc *, void *);
+void	 ca_reset(struct privsep *);
 int	 ca_reload(struct iked *);
 
 int	 ca_getreq(struct iked *, struct imsg *);
@@ -54,25 +55,26 @@ int	 ca_getcert(struct iked *, struct imsg *);
 int	 ca_getauth(struct iked *, struct imsg *);
 X509	*ca_by_subjectpubkey(X509_STORE *, uint8_t *, size_t);
 X509	*ca_by_issuer(X509_STORE *, X509_NAME *, struct iked_static_id *);
+X509	*ca_by_subjectaltname(X509_STORE *, struct iked_static_id *);
 int	 ca_subjectpubkey_digest(X509 *, uint8_t *, unsigned int *);
 int	 ca_x509_subject_cmp(X509 *, struct iked_static_id *);
 int	 ca_validate_pubkey(struct iked *, struct iked_static_id *,
 	    void *, size_t);
 int	 ca_validate_cert(struct iked *, struct iked_static_id *,
 	    void *, size_t);
+int	 ca_privkey_to_method(struct iked_id *);
 struct ibuf *
 	 ca_x509_serialize(X509 *);
+int	 ca_x509_subjectaltname_do(X509 *, int, const char *,
+	    struct iked_static_id *, struct iked_id *);
 int	 ca_x509_subjectaltname_cmp(X509 *, struct iked_static_id *);
-int	 ca_x509_subjectaltname(X509 *cert, struct iked_id *);
-int	 ca_privkey_serialize(EVP_PKEY *, struct iked_id *);
-int	 ca_pubkey_serialize(EVP_PKEY *, struct iked_id *);
+int	 ca_x509_subjectaltname_log(X509 *, const char *);
+int	 ca_x509_subjectaltname_get(X509 *cert, struct iked_id *);
 int	 ca_dispatch_parent(int, struct privsep_proc *, struct imsg *);
-int	 ca_dispatch_ikev1(int, struct privsep_proc *, struct imsg *);
 int	 ca_dispatch_ikev2(int, struct privsep_proc *, struct imsg *);
 
 static struct privsep_proc procs[] = {
 	{ "parent",	PROC_PARENT,	ca_dispatch_parent },
-	{ "ikev1",	PROC_IKEV1,	ca_dispatch_ikev1 },
 	{ "ikev2",	PROC_IKEV2,	ca_dispatch_ikev2 }
 };
 
@@ -85,44 +87,79 @@ struct ca_store {
 
 	struct iked_id	 ca_privkey;
 	struct iked_id	 ca_pubkey;
+
+	uint8_t		 ca_privkey_method;
 };
 
 pid_t
 caproc(struct privsep *ps, struct privsep_proc *p)
 {
-	struct ca_store	*store;
-	FILE		*fp = NULL;
-	EVP_PKEY	*key;
-
-	/*
-	 * This function runs code before privsep
-	 */
-	if ((store = calloc(1, sizeof(*store))) == NULL)
-		fatal("ca: failed to allocate cert store");
-
-	/* Read private key */
-	if ((fp = fopen(IKED_PRIVKEY, "r")) == NULL)
-		fatal("ca: failed to open private key");
-
-	if ((key = PEM_read_PrivateKey(fp, NULL, NULL, NULL)) == NULL)
-		fatalx("ca: failed to read private key");
-	fclose(fp);
-
-	if (ca_privkey_serialize(key, &store->ca_privkey) != 0)
-		fatalx("ca: failed to serialize private key");
-	if (ca_pubkey_serialize(key, &store->ca_pubkey) != 0)
-		fatalx("ca: failed to serialize public key");
-
-	EVP_PKEY_free(key);
-
-	return (proc_run(ps, p, procs, nitems(procs), ca_reset, store));
+	return (proc_run(ps, p, procs, nitems(procs), ca_run, NULL));
 }
 
 void
-ca_reset(struct privsep *ps, struct privsep_proc *p, void *arg)
+ca_run(struct privsep *ps, struct privsep_proc *p, void *arg)
 {
 	struct iked	*env = ps->ps_env;
-	struct ca_store	*store = arg;
+	struct ca_store	*store;
+
+	/*
+	 * pledge in the ca process:
+	 * stdio - for malloc and basic I/O including events.
+	 * rpath - for certificate files.
+	 * recvfd - for ocsp sockets.
+	 */
+	if (pledge("stdio rpath recvfd", NULL) == -1)
+		fatal("pledge");
+
+	if ((store = calloc(1, sizeof(*store))) == NULL)
+		fatal("%s: failed to allocate cert store", __func__);
+
+	env->sc_priv = store;
+}
+
+void
+ca_getkey(struct privsep *ps, struct iked_id *key, enum imsg_type type)
+{
+	struct iked	*env = ps->ps_env;
+	struct ca_store	*store = env->sc_priv;
+	struct iked_id	*id;
+	const char	*name;
+
+	if (store == NULL)
+		fatalx("%s: invalid store", __func__);
+
+	if (type == IMSG_PRIVKEY) {
+		name = "private";
+		id = &store->ca_privkey;
+
+		store->ca_privkey_method = ca_privkey_to_method(key);
+		if (store->ca_privkey_method == IKEV2_AUTH_NONE)
+			fatalx("ca: failed to get auth method for privkey");
+	} else if (type == IMSG_PUBKEY) {
+		name = "public";
+		id = &store->ca_pubkey;
+	} else
+		fatalx("%s: invalid type %d", __func__, type);
+
+	log_debug("%s: received %s key type %s length %zd", __func__,
+	    name, print_map(key->id_type, ikev2_cert_map),
+	    ibuf_length(key->id_buf));
+
+	/* clear old key and copy new one */
+	ibuf_release(id->id_buf);
+	memcpy(id, key, sizeof(*id));
+}
+
+void
+ca_reset(struct privsep *ps)
+{
+	struct iked	*env = ps->ps_env;
+	struct ca_store	*store = env->sc_priv;
+
+	if (store->ca_privkey.id_type == IKEV2_ID_NONE ||
+	    store->ca_pubkey.id_type == IKEV2_ID_NONE)
+		fatalx("ca_reset: keys not loaded");
 
 	if (store->ca_cas != NULL)
 		X509_STORE_free(store->ca_cas);
@@ -141,8 +178,6 @@ ca_reset(struct privsep *ps, struct privsep_proc *p, void *arg)
 	    X509_LOOKUP_file())) == NULL)
 		fatalx("ca_reset: failed to add cert lookup");
 
-	env->sc_priv = store;
-
 	if (ca_reload(env) != 0)
 		fatal("ca_reset: reload");
 }
@@ -151,7 +186,6 @@ int
 ca_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 {
 	struct iked		*env = p->p_env;
-	struct ca_store		*store = env->sc_priv;
 	unsigned int		 mode;
 
 	switch (imsg->hdr.type) {
@@ -159,8 +193,8 @@ ca_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 		IMSG_SIZE_CHECK(imsg, &mode);
 		memcpy(&mode, imsg->data, sizeof(mode));
 		if (mode == RESET_ALL || mode == RESET_CA) {
-			log_debug("%s: config reload", __func__);
-			ca_reset(&env->sc_ps, p, store);
+			log_debug("%s: config reset", __func__);
+			ca_reset(&env->sc_ps);
 		}
 		break;
 	case IMSG_OCSP_FD:
@@ -169,17 +203,15 @@ ca_dispatch_parent(int fd, struct privsep_proc *p, struct imsg *imsg)
 	case IMSG_OCSP_URL:
 		config_getocsp(env, imsg);
 		break;
+	case IMSG_PRIVKEY:
+	case IMSG_PUBKEY:
+		config_getkey(env, imsg);
+		break;
 	default:
 		return (-1);
 	}
 
 	return (0);
-}
-
-int
-ca_dispatch_ikev1(int fd, struct privsep_proc *p, struct imsg *imsg)
-{
-	return (-1);
 }
 
 int
@@ -241,8 +273,7 @@ ca_setcert(struct iked *env, struct iked_sahdr *sh, struct iked_id *id,
 	iov[iovcnt].iov_len = len;
 	iovcnt++;
 
-	if (proc_composev_imsg(&env->sc_ps, procid, -1,
-	    IMSG_CERT, -1, iov, iovcnt) == -1)
+	if (proc_composev(&env->sc_ps, procid, IMSG_CERT, iov, iovcnt) == -1)
 		return (-1);
 	return (0);
 }
@@ -283,8 +314,7 @@ ca_setreq(struct iked *env, struct iked_sa *sa,
 	iov[iovcnt].iov_len = len;
 	iovcnt++;
 
-	if (proc_composev_imsg(&env->sc_ps, procid, -1,
-	    IMSG_CERTREQ, -1, iov, iovcnt) == -1)
+	if (proc_composev(&env->sc_ps, procid, IMSG_CERTREQ, iov, iovcnt) == -1)
 		goto done;
 
 	sa_stateflags(sa, IKED_REQ_CERTREQ);
@@ -304,10 +334,18 @@ ca_setauth(struct iked *env, struct iked_sa *sa,
 	struct iked_policy	*policy = sa->sa_policy;
 	uint8_t			 type = policy->pol_auth.auth_method;
 
-	/* switch encoding to IKEV2_AUTH_SIG if SHA2 is supported */
-	if (sa->sa_sigsha2 && type == IKEV2_AUTH_RSA_SIG) {
-		log_debug("%s: switching from RSA_SIG to SIG", __func__);
-		type = IKEV2_AUTH_SIG;
+	if (id == PROC_CERT) {
+		/* switch encoding to IKEV2_AUTH_SIG if SHA2 is supported */
+		if (sa->sa_sigsha2 && type == IKEV2_AUTH_RSA_SIG) {
+			log_debug("%s: switching RSA_SIG to SIG", __func__);
+			type = IKEV2_AUTH_SIG;
+		} else if (!sa->sa_sigsha2 && type == IKEV2_AUTH_SIG_ANY) {
+			log_debug("%s: switching SIG to RSA_SIG(*)", __func__);
+			/* XXX ca might auto-switch to ECDSA */
+			type = IKEV2_AUTH_RSA_SIG;
+		} else if (type == IKEV2_AUTH_SIG) {
+			log_debug("%s: using SIG (RFC7427)", __func__);
+		}
 	}
 
 	if (type == IKEV2_AUTH_SHARED_KEY_MIC) {
@@ -328,8 +366,7 @@ ca_setauth(struct iked *env, struct iked_sa *sa,
 		log_debug("%s: auth length %zu", __func__, ibuf_size(authmsg));
 	}
 
-	if (proc_composev_imsg(&env->sc_ps, id, -1,
-	    IMSG_AUTH, -1, iov, iovcnt) == -1)
+	if (proc_composev(&env->sc_ps, id, IMSG_AUTH, iov, iovcnt) == -1)
 		return (-1);
 	return (0);
 }
@@ -371,6 +408,7 @@ ca_getcert(struct iked *env, struct imsg *imsg)
 		}
 		break;
 	case IKEV2_CERT_RSA_KEY:
+	case IKEV2_CERT_ECDSA:
 		ret = ca_validate_pubkey(env, &id, ptr, len);
 		break;
 	default:
@@ -389,8 +427,7 @@ ca_getcert(struct iked *env, struct imsg *imsg)
 	iov[1].iov_base = &type;
 	iov[1].iov_len = sizeof(type);
 
-	if (proc_composev_imsg(&env->sc_ps, PROC_IKEV2, -1,
-	    cmd, -1, iov, iovcnt) == -1)
+	if (proc_composev(&env->sc_ps, PROC_IKEV2, cmd, iov, iovcnt) == -1)
 		return (-1);
 	return (0);
 }
@@ -422,6 +459,7 @@ ca_getreq(struct iked *env, struct imsg *imsg)
 
 	switch (type) {
 	case IKEV2_CERT_RSA_KEY:
+	case IKEV2_CERT_ECDSA:
 		if (store->ca_pubkey.id_type != type ||
 		    (buf = store->ca_pubkey.id_buf) == NULL)
 			return (-1);
@@ -445,7 +483,9 @@ ca_getreq(struct iked *env, struct imsg *imsg)
 				break;
 			}
 		}
-		if (ca == NULL || cert == NULL) {
+		if (cert == NULL)
+			cert = ca_by_subjectaltname(store->ca_certs, &id);
+		if (cert == NULL) {
 			log_warnx("%s: no valid local certificate found",
 			    __func__);
 			type = IKEV2_CERT_NONE;
@@ -508,12 +548,13 @@ ca_getauth(struct iked *env, struct imsg *imsg)
 	bzero(&policy, sizeof(policy));
 	memcpy(&sa.sa_hdr, &sh, sizeof(sh));
 	sa.sa_policy = &policy;
-	policy.pol_auth.auth_method = method;
 	if (sh.sh_initiator)
 		id = &sa.sa_icert;
 	else
 		id = &sa.sa_rcert;
 	memcpy(id, &store->ca_privkey, sizeof(*id));
+	policy.pol_auth.auth_method = method == IKEV2_AUTH_SIG ?
+	    method : store->ca_privkey_method;
 
 	if (ikev2_msg_authsign(env, &sa, &policy.pol_auth, authmsg) != 0) {
 		log_debug("%s: AUTH sign failed", __func__);
@@ -554,7 +595,7 @@ ca_reload(struct iked *env)
 			continue;
 
 		if (snprintf(file, sizeof(file), "%s%s",
-		    IKED_CA_DIR, entry->d_name) == -1)
+		    IKED_CA_DIR, entry->d_name) < 0)
 			continue;
 
 		if (!X509_load_cert_file(store->ca_calookup, file,
@@ -580,7 +621,7 @@ ca_reload(struct iked *env)
 			continue;
 
 		if (snprintf(file, sizeof(file), "%s%s",
-		    IKED_CRL_DIR, entry->d_name) == -1)
+		    IKED_CRL_DIR, entry->d_name) < 0)
 			continue;
 
 		if (!X509_load_crl_file(store->ca_calookup, file,
@@ -618,6 +659,7 @@ ca_reload(struct iked *env)
 
 		if (ibuf_add(env->sc_certreq, md, len) != 0) {
 			ibuf_release(env->sc_certreq);
+			env->sc_certreq = NULL;
 			return (-1);
 		}
 	}
@@ -636,8 +678,8 @@ ca_reload(struct iked *env)
 		    ibuf_length(env->sc_certreq) == SHA_DIGEST_LENGTH ?
 		    "" : "s");
 
-		(void)proc_composev_imsg(&env->sc_ps, PROC_IKEV2, -1,
-		    IMSG_CERTREQ, -1, iov, iovcnt);
+		(void)proc_composev(&env->sc_ps, PROC_IKEV2, IMSG_CERTREQ,
+		    iov, iovcnt);
 	}
 
 	/*
@@ -652,7 +694,7 @@ ca_reload(struct iked *env)
 			continue;
 
 		if (snprintf(file, sizeof(file), "%s%s",
-		    IKED_CERT_DIR, entry->d_name) == -1)
+		    IKED_CERT_DIR, entry->d_name) < 0)
 			continue;
 
 		if (!X509_load_cert_file(store->ca_certlookup, file,
@@ -687,8 +729,7 @@ ca_reload(struct iked *env)
 	iov[0].iov_len = sizeof(env->sc_certreqtype);
 	if (iovcnt == 0)
 		iovcnt++;
-	(void)proc_composev_imsg(&env->sc_ps, PROC_IKEV2, -1,
-	    IMSG_CERTREQ, -1, iov, iovcnt);
+	(void)proc_composev(&env->sc_ps, PROC_IKEV2, IMSG_CERTREQ, iov, iovcnt);
 
 	return (0);
 }
@@ -759,9 +800,40 @@ ca_by_issuer(X509_STORE *ctx, X509_NAME *subject, struct iked_static_id *id)
 	return (NULL);
 }
 
+X509 *
+ca_by_subjectaltname(X509_STORE *ctx, struct iked_static_id *id)
+{
+	STACK_OF(X509_OBJECT)	*h;
+	X509_OBJECT		*xo;
+	X509			*cert;
+	int			 i;
+
+	h = ctx->objs;
+	for (i = 0; i < sk_X509_OBJECT_num(h); i++) {
+		xo = sk_X509_OBJECT_value(h, i);
+		if (xo->type != X509_LU_X509)
+			continue;
+
+		cert = xo->data.x509;
+		switch (id->id_type) {
+		case IKEV2_ID_ASN1_DN:
+			if (ca_x509_subject_cmp(cert, id) == 0)
+				return (cert);
+			break;
+		default:
+			if (ca_x509_subjectaltname_cmp(cert, id) == 0)
+				return (cert);
+			break;
+		}
+	}
+
+	return (NULL);
+}
+
 int
 ca_subjectpubkey_digest(X509 *x509, uint8_t *md, unsigned int *size)
 {
+	EVP_PKEY	*pkey;
 	uint8_t		*buf = NULL;
 	int		 buflen;
 
@@ -772,10 +844,13 @@ ca_subjectpubkey_digest(X509 *x509, uint8_t *md, unsigned int *size)
 	 * Generate a SHA-1 digest of the Subject Public Key Info
 	 * element in the X.509 certificate, an ASN.1 sequence
 	 * that includes the public key type (eg. RSA) and the
-	 * public key value (see 3.7 of RFC4306).
+	 * public key value (see 3.7 of RFC7296).
 	 */
-	buflen = i2d_X509_PUBKEY(X509_get_X509_PUBKEY(x509), &buf);
-	if (!buflen)
+	if ((pkey = X509_get_pubkey(x509)) == NULL)
+		return (-1);
+	buflen = i2d_PUBKEY(pkey, &buf);
+	EVP_PKEY_free(pkey);
+	if (buflen == 0)
 		return (-1);
 	if (!EVP_Digest(buf, buflen, md, size, EVP_sha1(), NULL)) {
 		free(buf);
@@ -812,6 +887,7 @@ int
 ca_pubkey_serialize(EVP_PKEY *key, struct iked_id *id)
 {
 	RSA		*rsa = NULL;
+	EC_KEY		*ec = NULL;
 	uint8_t		*d;
 	int		 len = 0;
 	int		 ret = -1;
@@ -821,6 +897,7 @@ ca_pubkey_serialize(EVP_PKEY *key, struct iked_id *id)
 		id->id_type = 0;
 		id->id_offset = 0;
 		ibuf_release(id->id_buf);
+		id->id_buf = NULL;
 
 		if ((rsa = EVP_PKEY_get1_RSA(key)) == NULL)
 			goto done;
@@ -832,10 +909,33 @@ ca_pubkey_serialize(EVP_PKEY *key, struct iked_id *id)
 		d = ibuf_data(id->id_buf);
 		if (i2d_RSAPublicKey(rsa, &d) != len) {
 			ibuf_release(id->id_buf);
+			id->id_buf = NULL;
 			goto done;
 		}
 
 		id->id_type = IKEV2_CERT_RSA_KEY;
+		break;
+	case EVP_PKEY_EC:
+		id->id_type = 0;
+		id->id_offset = 0;
+		ibuf_release(id->id_buf);
+		id->id_buf = NULL;
+
+		if ((ec = EVP_PKEY_get1_EC_KEY(key)) == NULL)
+			goto done;
+		if ((len = i2d_EC_PUBKEY(ec, NULL)) <= 0)
+			goto done;
+		if ((id->id_buf = ibuf_new(NULL, len)) == NULL)
+			goto done;
+
+		d = ibuf_data(id->id_buf);
+		if (i2d_EC_PUBKEY(ec, &d) != len) {
+			ibuf_release(id->id_buf);
+			id->id_buf = NULL;
+			goto done;
+		}
+
+		id->id_type = IKEV2_CERT_ECDSA;
 		break;
 	default:
 		log_debug("%s: unsupported key type %d", __func__, key->type);
@@ -849,6 +949,8 @@ ca_pubkey_serialize(EVP_PKEY *key, struct iked_id *id)
  done:
 	if (rsa != NULL)
 		RSA_free(rsa);
+	if (ec != NULL)
+		EC_KEY_free(ec);
 	return (ret);
 }
 
@@ -856,6 +958,7 @@ int
 ca_privkey_serialize(EVP_PKEY *key, struct iked_id *id)
 {
 	RSA		*rsa = NULL;
+	EC_KEY		*ec = NULL;
 	uint8_t		*d;
 	int		 len = 0;
 	int		 ret = -1;
@@ -865,6 +968,7 @@ ca_privkey_serialize(EVP_PKEY *key, struct iked_id *id)
 		id->id_type = 0;
 		id->id_offset = 0;
 		ibuf_release(id->id_buf);
+		id->id_buf = NULL;
 
 		if ((rsa = EVP_PKEY_get1_RSA(key)) == NULL)
 			goto done;
@@ -876,10 +980,33 @@ ca_privkey_serialize(EVP_PKEY *key, struct iked_id *id)
 		d = ibuf_data(id->id_buf);
 		if (i2d_RSAPrivateKey(rsa, &d) != len) {
 			ibuf_release(id->id_buf);
+			id->id_buf = NULL;
 			goto done;
 		}
 
 		id->id_type = IKEV2_CERT_RSA_KEY;
+		break;
+	case EVP_PKEY_EC:
+		id->id_type = 0;
+		id->id_offset = 0;
+		ibuf_release(id->id_buf);
+		id->id_buf = NULL;
+
+		if ((ec = EVP_PKEY_get1_EC_KEY(key)) == NULL)
+			goto done;
+		if ((len = i2d_ECPrivateKey(ec, NULL)) <= 0)
+			goto done;
+		if ((id->id_buf = ibuf_new(NULL, len)) == NULL)
+			goto done;
+
+		d = ibuf_data(id->id_buf);
+		if (i2d_ECPrivateKey(ec, &d) != len) {
+			ibuf_release(id->id_buf);
+			id->id_buf = NULL;
+			goto done;
+		}
+
+		id->id_type = IKEV2_CERT_ECDSA;
 		break;
 	default:
 		log_debug("%s: unsupported key type %d", __func__, key->type);
@@ -893,7 +1020,55 @@ ca_privkey_serialize(EVP_PKEY *key, struct iked_id *id)
  done:
 	if (rsa != NULL)
 		RSA_free(rsa);
+	if (ec != NULL)
+		EC_KEY_free(ec);
 	return (ret);
+}
+
+int
+ca_privkey_to_method(struct iked_id *privkey)
+{
+	BIO		*rawcert = NULL;
+	EC_KEY		*ec = NULL;
+	const EC_GROUP	*group = NULL;
+	uint8_t	 method = IKEV2_AUTH_NONE;
+
+	switch (privkey->id_type) {
+	case IKEV2_CERT_RSA_KEY:
+		method = IKEV2_AUTH_RSA_SIG;
+		break;
+	case IKEV2_CERT_ECDSA:
+		if ((rawcert = BIO_new_mem_buf(ibuf_data(privkey->id_buf),
+		    ibuf_length(privkey->id_buf))) == NULL)
+			goto out;
+		if ((ec = d2i_ECPrivateKey_bio(rawcert, NULL)) == NULL)
+			goto out;
+		if ((group = EC_KEY_get0_group(ec)) == NULL)
+			goto out;
+		switch (EC_GROUP_get_degree(group)) {
+		case 256:
+			method = IKEV2_AUTH_ECDSA_256;
+			break;
+		case 384:
+			method = IKEV2_AUTH_ECDSA_384;
+			break;
+		case 521:
+			method = IKEV2_AUTH_ECDSA_521;
+			break;
+		}
+	}
+
+	log_debug("%s: type %s method %s", __func__,
+	    print_map(privkey->id_type, ikev2_cert_map),
+	    print_map(method, ikev2_auth_map));
+
+ out:
+	if (ec != NULL)
+		EC_KEY_free(ec);
+	if (rawcert != NULL)
+		BIO_free(rawcert);
+
+	return (method);
 }
 
 char *
@@ -1026,6 +1201,7 @@ ca_validate_pubkey(struct iked *env, struct iked_static_id *id,
 {
 	BIO		*rawcert = NULL;
 	RSA		*peerrsa = NULL, *localrsa = NULL;
+	EC_KEY		*peerec = NULL;
 	EVP_PKEY	*peerkey = NULL, *localkey = NULL;
 	int		 ret = -1;
 	FILE		*fp = NULL;
@@ -1044,6 +1220,8 @@ ca_validate_pubkey(struct iked *env, struct iked_static_id *id,
 		break;
 	default:
 		/* Some types like ASN1_DN will not be mapped to file names */
+		log_debug("%s: unsupported public key type %s",
+		    __func__, print_map(id->id_type, ikev2_id_map));
 		return (-1);
 	}
 
@@ -1063,24 +1241,37 @@ ca_validate_pubkey(struct iked *env, struct iked_static_id *id,
 		if ((rawcert = BIO_new_mem_buf(data, len)) == NULL)
 			goto done;
 
-		if ((peerrsa = d2i_RSAPublicKey_bio(rawcert, NULL)) == NULL)
-			goto sslerr;
 		if ((peerkey = EVP_PKEY_new()) == NULL)
 			goto sslerr;
-		if (!EVP_PKEY_set1_RSA(peerkey, peerrsa))
+		if ((peerrsa = d2i_RSAPublicKey_bio(rawcert, NULL))) {
+			if (!EVP_PKEY_set1_RSA(peerkey, peerrsa)) {
+				goto sslerr;
+			}
+		} else if (BIO_reset(rawcert) == 1 &&
+		    (peerec = d2i_EC_PUBKEY_bio(rawcert, NULL))) {
+			if (!EVP_PKEY_set1_EC_KEY(peerkey, peerec)) {
+				goto sslerr;
+			}
+		} else {
+			log_debug("%s: unknown key type received", __func__);
 			goto sslerr;
+		}
 	}
 
 	lc_string(idstr);
 	if (strlcpy(file, IKED_PUBKEY_DIR, sizeof(file)) >= sizeof(file) ||
-	    strlcat(file, idstr, sizeof(file)) >= sizeof(file))
+	    strlcat(file, idstr, sizeof(file)) >= sizeof(file)) {
+		log_debug("%s: public key id too long %s", __func__, idstr);
 		goto done;
+	}
 
-	if ((fp = fopen(file, "r")) == NULL)
+	if ((fp = fopen(file, "r")) == NULL) {
+		log_debug("%s: could not open public key %s", __func__, file);
 		goto done;
+	}
 	localkey = PEM_read_PUBKEY(fp, NULL, NULL, NULL);
 	if (localkey == NULL) {
-		/* reading PKCS #8 failed, try PEM */
+		/* reading PKCS #8 failed, try PEM RSA */
 		rewind(fp);
 		localrsa = PEM_read_RSAPublicKey(fp, NULL, NULL, NULL);
 		fclose(fp);
@@ -1096,8 +1287,10 @@ ca_validate_pubkey(struct iked *env, struct iked_static_id *id,
 	if (localkey == NULL)
 		goto sslerr;
 
-	if (!EVP_PKEY_cmp(peerkey, localkey))
+	if (!EVP_PKEY_cmp(peerkey, localkey)) {
+		log_debug("%s: public key does not match %s", __func__, file);
 		goto done;
+	}
 
 	log_debug("%s: valid public key in file %s", __func__, file);
 
@@ -1113,6 +1306,8 @@ ca_validate_pubkey(struct iked *env, struct iked_static_id *id,
 		EVP_PKEY_free(localkey);
 	if (peerrsa != NULL)
 		RSA_free(peerrsa);
+	if (peerec != NULL)
+		EC_KEY_free(peerec);
 	if (localrsa != NULL)
 		RSA_free(localrsa);
 	if (rawcert != NULL)
@@ -1236,106 +1431,128 @@ ca_x509_subject_cmp(X509 *cert, struct iked_static_id *id)
 	return (ret);
 }
 
+#define MODE_ALT_LOG	1
+#define MODE_ALT_GET	2
+#define MODE_ALT_CMP	3
 int
-ca_x509_subjectaltname_cmp(X509 *cert, struct iked_static_id *id)
+ca_x509_subjectaltname_do(X509 *cert, int mode, const char *logmsg,
+    struct iked_static_id *id, struct iked_id *retid)
 {
-	struct iked_id	 sanid;
-	char		 idstr[IKED_ID_SIZE];
-	int		 ret = -1;
+	STACK_OF(GENERAL_NAME) *stack = NULL;
+	GENERAL_NAME *entry;
+	ASN1_STRING *cstr;
+	char idstr[IKED_ID_SIZE];
+	int idx, ret, i, type, len;
+	uint8_t *data;
 
-	bzero(&sanid, sizeof(sanid));
+	ret = -1;
+	idx = -1;
+	while ((stack = X509_get_ext_d2i(cert, NID_subject_alt_name,
+	    NULL, &idx)) != NULL) {
+		for (i = 0; i < sk_GENERAL_NAME_num(stack); i++) {
+			entry = sk_GENERAL_NAME_value(stack, i);
+			switch (entry->type) {
+			case GEN_DNS:
+				cstr = entry->d.dNSName;
+				if (ASN1_STRING_type(cstr) != V_ASN1_IA5STRING)
+					continue;
+				type = IKEV2_ID_FQDN;
+				break;
+			case GEN_EMAIL:
+				cstr = entry->d.rfc822Name;
+				if (ASN1_STRING_type(cstr) != V_ASN1_IA5STRING)
+					continue;
+				type = IKEV2_ID_UFQDN;
+				break;
+			case GEN_IPADD:
+				cstr = entry->d.iPAddress;
+				switch (ASN1_STRING_length(cstr)) {
+				case 4:
+					type = IKEV2_ID_IPV4;
+					break;
+				case 16:
+					type = IKEV2_ID_IPV6;
+					break;
+				default:
+					log_debug("%s: invalid subjectAltName"
+					   " IP address", __func__);
+					continue;
+				}
+				break;
+			default:
+				continue;
+			}
+			len = ASN1_STRING_length(cstr);
+			data = ASN1_STRING_data(cstr);
+			if (mode == MODE_ALT_LOG) {
+				struct iked_id sanid;
 
-	if (ca_x509_subjectaltname(cert, &sanid) != 0)
-		return (-1);
-
-	ikev2_print_id(&sanid, idstr, sizeof(idstr));
-
-	/* Compare id types, length and data */
-	if ((id->id_type != sanid.id_type) ||
-	    ((ssize_t)ibuf_size(sanid.id_buf) !=
-	    (id->id_length - id->id_offset)) ||
-	    (memcmp(id->id_data + id->id_offset,
-	    ibuf_data(sanid.id_buf),
-	    ibuf_size(sanid.id_buf)) != 0)) {
-		log_debug("%s: %s mismatched", __func__, idstr);
-		goto done;
+				bzero(&sanid, sizeof(sanid));
+				sanid.id_offset = 0;
+				sanid.id_type = type;
+				if ((sanid.id_buf = ibuf_new(data, len))
+				    == NULL) {
+					log_debug("%s: failed to get id buffer",
+					     __func__);
+					continue;
+				}
+				ikev2_print_id(&sanid, idstr, sizeof(idstr));
+				log_info("%s: altname: %s", logmsg, idstr);
+				ibuf_release(sanid.id_buf);
+				sanid.id_buf = NULL;
+			}
+			/* Compare length and data */
+			if (mode == MODE_ALT_CMP) {
+				if (type == id->id_type &&
+				    (len == (id->id_length - id->id_offset)) &&
+				    (memcmp(id->id_data + id->id_offset,
+				    data, len)) == 0) {
+					ret = 0;
+					break;
+				}
+			}
+			/* Get first ID */
+			if (mode == MODE_ALT_GET) {
+				ibuf_release(retid->id_buf);
+				if ((retid->id_buf = ibuf_new(data, len)) == NULL) {
+					log_debug("%s: failed to get id buffer",
+					    __func__);
+					ret = -2;
+					break;
+				}
+				retid->id_offset = 0;
+				ikev2_print_id(retid, idstr, sizeof(idstr));
+				log_debug("%s: %s", __func__, idstr);
+				ret = 0;
+				break;
+			}
+		}
+		sk_GENERAL_NAME_pop_free(stack, GENERAL_NAME_free);
+		if (ret != -1)
+			break;
 	}
-
-	ret = 0;
- done:
-	ibuf_release(sanid.id_buf);
-	return (ret);
+	if (idx == -1)
+		log_debug("%s: did not find subjectAltName in certificate",
+		    __func__);
+	return ret;
 }
 
 int
-ca_x509_subjectaltname(X509 *cert, struct iked_id *id)
+ca_x509_subjectaltname_log(X509 *cert, const char *logmsg)
 {
-	X509_EXTENSION	*san;
-	uint8_t		 sanhdr[4], *data;
-	int		 ext, santype, sanlen;
-	char		 idstr[IKED_ID_SIZE];
+	return ca_x509_subjectaltname_do(cert, MODE_ALT_LOG, logmsg, NULL, NULL);
+}
 
-	if ((ext = X509_get_ext_by_NID(cert,
-	    NID_subject_alt_name, -1)) == -1 ||
-	    ((san = X509_get_ext(cert, ext)) == NULL)) {
-		log_debug("%s: did not find subjectAltName in certificate",
-		    __func__);
-		return (-1);
-	}
+int
+ca_x509_subjectaltname_cmp(X509 *cert, struct iked_static_id *id)
+{
+	return ca_x509_subjectaltname_do(cert, MODE_ALT_CMP, NULL, id, NULL);
+}
 
-	if (san->value == NULL || san->value->data == NULL ||
-	    san->value->length < (int)sizeof(sanhdr)) {
-		log_debug("%s: invalid subjectAltName in certificate",
-		    __func__);
-		return (-1);
-	}
-
-	/* This is partially based on isakmpd's x509 subjectaltname code */
-	data = (uint8_t *)san->value->data;
-	memcpy(&sanhdr, data, sizeof(sanhdr));
-	santype = sanhdr[2] & 0x3f;
-	sanlen = sanhdr[3];
-
-	if ((sanlen + (int)sizeof(sanhdr)) > san->value->length) {
-		log_debug("%s: invalid subjectAltName length", __func__);
-		return (-1);
-	}
-
-	switch (santype) {
-	case GEN_DNS:
-		id->id_type = IKEV2_ID_FQDN;
-		break;
-	case GEN_EMAIL:
-		id->id_type = IKEV2_ID_UFQDN;
-		break;
-	case GEN_IPADD:
-		if (sanlen == 4)
-			id->id_type = IKEV2_ID_IPV4;
-		else if (sanlen == 16)
-			id->id_type = IKEV2_ID_IPV6;
-		else {
-			log_debug("%s: invalid subjectAltName IP address",
-			    __func__);
-			return (-1);
-		}
-		break;
-	default:
-		log_debug("%s: unsupported subjectAltName type %d",
-		    __func__, santype);
-		return (-1);
-	}
-
-	ibuf_release(id->id_buf);
-	if ((id->id_buf = ibuf_new(data + sizeof(sanhdr), sanlen)) == NULL) {
-		log_debug("%s: failed to get id buffer", __func__);
-		return (-1);
-	}
-	id->id_offset = 0;
-
-	ikev2_print_id(id, idstr, sizeof(idstr));
-	log_debug("%s: %s", __func__, idstr);
-
-	return (0);
+int
+ca_x509_subjectaltname_get(X509 *cert, struct iked_id *retid)
+{
+	return ca_x509_subjectaltname_do(cert, MODE_ALT_GET, NULL, NULL, retid);
 }
 
 void
@@ -1355,6 +1572,6 @@ ca_sslerror(const char *caller)
 	unsigned long	 error;
 
 	while ((error = ERR_get_error()) != 0)
-		log_warn("%s: %s: %.100s", __func__, caller,
+		log_warnx("%s: %s: %.100s", __func__, caller,
 		    ERR_error_string(error, NULL));
 }

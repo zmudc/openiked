@@ -1,4 +1,4 @@
-/*	$OpenBSD: proc.c,v 1.23 2015/08/21 11:59:28 reyk Exp $	*/
+/*	$OpenBSD: proc.c,v 1.31 2018/08/06 06:30:06 mestre Exp $	*/
 
 /*
  * Copyright (c) 2010 - 2014 Reyk Floeter <reyk@openbsd.org>
@@ -17,15 +17,10 @@
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
 
+#include <sys/types.h>
 #include <sys/queue.h>
 #include <sys/socket.h>
 #include <sys/wait.h>
-#include <sys/tree.h>
-
-#include <net/if.h>
-#include <netinet/in.h>
-#include <netinet/ip.h>
-#include <arpa/inet.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -35,6 +30,7 @@
 #include <signal.h>
 #include <pwd.h>
 #include <event.h>
+#include <imsg.h>
 
 #include "iked.h"
 
@@ -45,6 +41,7 @@ int	 proc_ispeer(struct privsep_proc *, unsigned int, enum privsep_procid);
 void	 proc_shutdown(struct privsep_proc *);
 void	 proc_sig_handler(int, short, void *);
 void	 proc_range(struct privsep *, enum privsep_procid, int *, int *);
+int	 proc_dispatch_null(int, struct privsep_proc *, struct imsg *);
 
 int
 proc_ispeer(struct privsep_proc *procs, unsigned int nproc,
@@ -164,6 +161,8 @@ proc_open(struct privsep *ps, struct privsep_proc *p,
 	for (proc = 0; proc < nproc; proc++) {
 		procs[proc].p_ps = ps;
 		procs[proc].p_env = ps->ps_env;
+		if (procs[proc].p_cb == NULL)
+			procs[proc].p_cb = proc_dispatch_null;
 
 		for (i = 0; i < ps->ps_instances[src]; i++) {
 			for (j = 0; j < ps->ps_instances[procs[proc].p_id];
@@ -175,12 +174,10 @@ proc_open(struct privsep *ps, struct privsep_proc *p,
 				if (pa->pp_pipes[procs[proc].p_id][j] != -1)
 					continue;
 
-				if (socketpair(AF_UNIX, SOCK_STREAM,
+				if (socketpair(AF_UNIX,
+				    SOCK_STREAM | SOCK_NONBLOCK,
 				    PF_UNSPEC, fds) == -1)
 					fatal("socketpair");
-
-				socket_set_blockmode(fds[0], BM_NONBLOCK);
-				socket_set_blockmode(fds[1], BM_NONBLOCK);
 
 				pa->pp_pipes[procs[proc].p_id][j] = fds[0];
 				pb->pp_pipes[src][i] = fds[1];
@@ -294,9 +291,6 @@ proc_shutdown(struct privsep_proc *p)
 {
 	struct privsep	*ps = p->p_ps;
 
-	if (p->p_id == PROC_CONTROL && ps)
-		control_cleanup(&ps->ps_csock);
-
 	if (p->p_shutdown != NULL)
 		(*p->p_shutdown)();
 
@@ -332,7 +326,7 @@ proc_sig_handler(int sig, short event, void *arg)
 pid_t
 proc_run(struct privsep *ps, struct privsep_proc *p,
     struct privsep_proc *procs, unsigned int nproc,
-    void (*init)(struct privsep *, struct privsep_proc *, void *), void *arg)
+    void (*run)(struct privsep *, struct privsep_proc *, void *), void *arg)
 {
 	pid_t			 pid;
 	struct passwd		*pw;
@@ -350,6 +344,8 @@ proc_run(struct privsep *ps, struct privsep_proc *p,
 	case -1:
 		fatal("proc_run: cannot fork");
 	case 0:
+		log_procinit(p->p_title);
+
 		/* Set the process group of the current process */
 		setpgid(0, 0);
 		break;
@@ -361,10 +357,10 @@ proc_run(struct privsep *ps, struct privsep_proc *p,
 
 	if (p->p_id == PROC_CONTROL && ps->ps_instance == 0) {
 		if (control_init(ps, &ps->ps_csock) == -1)
-			fatalx(p->p_title);
+			fatalx(__func__);
 		TAILQ_FOREACH(rcs, &ps->ps_rcsocks, cs_entry)
 			if (control_init(ps, rcs) == -1)
-				fatalx(p->p_title);
+				fatalx(__func__);
 	}
 
 	/* Change root directory */
@@ -421,14 +417,14 @@ proc_run(struct privsep *ps, struct privsep_proc *p,
 	if (p->p_id == PROC_CONTROL && ps->ps_instance == 0) {
 		TAILQ_INIT(&ctl_conns);
 		if (control_listen(&ps->ps_csock) == -1)
-			fatalx(p->p_title);
+			fatalx(__func__);
 		TAILQ_FOREACH(rcs, &ps->ps_rcsocks, cs_entry)
 			if (control_listen(rcs) == -1)
-				fatalx(p->p_title);
+				fatalx(__func__);
 	}
 
-	if (init != NULL)
-		init(ps, p, arg);
+	if (run != NULL)
+		run(ps, p, arg);
 
 	event_dispatch();
 
@@ -453,8 +449,8 @@ proc_dispatch(int fd, short event, void *arg)
 	ibuf = &iev->ibuf;
 
 	if (event & EV_READ) {
-		if ((n = imsg_read(ibuf)) == -1)
-			fatal(title);
+		if ((n = imsg_read(ibuf)) == -1 && errno != EAGAIN)
+			fatal(__func__);
 		if (n == 0) {
 			/* this pipe is dead, so remove the event handler */
 			event_del(&iev->ev);
@@ -465,19 +461,19 @@ proc_dispatch(int fd, short event, void *arg)
 
 	if (event & EV_WRITE) {
 		if (msgbuf_write(&ibuf->w) <= 0 && errno != EAGAIN)
-			fatal(title);
+			fatal(__func__);
 	}
 
 	for (;;) {
 		if ((n = imsg_get(ibuf, &imsg)) == -1)
-			fatal(title);
+			fatal(__func__);
 		if (n == 0)
 			break;
 
 #if DEBUG > 1
-		log_debug("%s: %s %d got imsg %d from %s %d",
+		log_debug("%s: %s %d got imsg %d peerid %d from %s %d",
 		    __func__, title, ps->ps_instance + 1,
-		    imsg.hdr.type, p->p_title, p->p_instance);
+		    imsg.hdr.type, imsg.hdr.peerid, p->p_title, p->p_instance);
 #endif
 
 		/*
@@ -496,17 +492,25 @@ proc_dispatch(int fd, short event, void *arg)
 		case IMSG_CTL_VERBOSE:
 			IMSG_SIZE_CHECK(&imsg, &verbose);
 			memcpy(&verbose, imsg.data, sizeof(verbose));
-			log_verbose(verbose);
+			log_setverbose(verbose);
 			break;
 		default:
-			log_warnx("%s: %s %d got invalid imsg %d from %s %d",
+			log_warnx("%s: %s %d got invalid imsg %d peerid %d "
+			    "from %s %d",
 			    __func__, title, ps->ps_instance + 1,
-			    imsg.hdr.type, p->p_title, p->p_instance);
-			fatalx(title);
+			    imsg.hdr.type, imsg.hdr.peerid,
+			    p->p_title, p->p_instance);
+			fatalx(__func__);
 		}
 		imsg_free(&imsg);
 	}
 	imsg_event_add(iev);
+}
+
+int
+proc_dispatch_null(int fd, struct privsep_proc *p, struct imsg *imsg)
+{
+	return (-1);
 }
 
 /*
@@ -571,14 +575,14 @@ proc_range(struct privsep *ps, enum privsep_procid id, int *n, int *m)
 
 int
 proc_compose_imsg(struct privsep *ps, enum privsep_procid id, int n,
-    uint16_t type, int fd, void *data, uint16_t datalen)
+    uint16_t type, uint32_t peerid, int fd, void *data, uint16_t datalen)
 {
 	int	 m;
 
 	proc_range(ps, id, &n, &m);
 	for (; n < m; n++) {
 		if (imsg_compose_event(&ps->ps_ievs[id][n],
-		    type, -1, 0, fd, data, datalen) == -1)
+		    type, peerid, 0, fd, data, datalen) == -1)
 			return (-1);
 	}
 
@@ -586,18 +590,32 @@ proc_compose_imsg(struct privsep *ps, enum privsep_procid id, int n,
 }
 
 int
+proc_compose(struct privsep *ps, enum privsep_procid id,
+    uint16_t type, void *data, uint16_t datalen)
+{
+	return (proc_compose_imsg(ps, id, -1, type, -1, -1, data, datalen));
+}
+
+int
 proc_composev_imsg(struct privsep *ps, enum privsep_procid id, int n,
-    uint16_t type, int fd, const struct iovec *iov, int iovcnt)
+    uint16_t type, uint32_t peerid, int fd, const struct iovec *iov, int iovcnt)
 {
 	int	 m;
 
 	proc_range(ps, id, &n, &m);
 	for (; n < m; n++)
 		if (imsg_composev_event(&ps->ps_ievs[id][n],
-		    type, -1, 0, fd, iov, iovcnt) == -1)
+		    type, peerid, 0, fd, iov, iovcnt) == -1)
 			return (-1);
 
 	return (0);
+}
+
+int
+proc_composev(struct privsep *ps, enum privsep_procid id,
+    uint16_t type, const struct iovec *iov, int iovcnt)
+{
+	return (proc_composev_imsg(ps, id, -1, type, -1, -1, iov, iovcnt));
 }
 
 int
@@ -605,7 +623,7 @@ proc_forward_imsg(struct privsep *ps, struct imsg *imsg,
     enum privsep_procid id, int n)
 {
 	return (proc_compose_imsg(ps, id, n, imsg->hdr.type,
-	    imsg->fd, imsg->data, IMSG_DATA_SIZE(imsg)));
+	    imsg->hdr.peerid, imsg->fd, imsg->data, IMSG_DATA_SIZE(imsg)));
 }
 
 struct imsgbuf *

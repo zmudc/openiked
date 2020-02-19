@@ -1,6 +1,4 @@
-# $OpenBSD: ikeca.cnf,v 1.6 2014/11/22 18:15:41 deraadt Exp $
-
-RANDFILE		= /dev/random
+# $OpenBSD: ikeca.cnf,v 1.9 2017/01/31 21:35:07 sthen Exp $
 
 CERT_C			= DE
 CERT_ST			= Lower Saxony
@@ -17,13 +15,16 @@ EXTCERTUSAGE		= serverAuth,clientAuth
 CERTIP			= 0.0.0.0
 CERTFQDN		= nohost.nodomain
 CADB			= index.txt
+CASERIAL		= serial.txt
 NSCERTTYPE		= server,client
 
 [ req ]
-default_bits		= 2048
-default_keyfile 	= privkey.pem
+#default_bits		= 2048
+#default_md		= sha256
+#default_keyfile 	= privkey.pem
 distinguished_name	= req_distinguished_name
 #attributes		= req_attributes
+req_extensions		= $ENV::REQ_EXT
 
 [ req_distinguished_name ]
 countryName			= Country Name (2 letter code)
@@ -88,8 +89,21 @@ extendedKeyUsage=$ENV::EXTCERTUSAGE
 [ca]
 default_ca			= CA_default
 
+[CA_sign_policy]
+countryName			= optional
+stateOrProvinceName		= optional
+localityName			= optional
+organizationName		= optional
+organizationalUnitName		= optional
+commonName			= supplied
+emailAddress			= optional
+
 [CA_default]
 database			= $ENV::CADB
-default_md			= sha1
+serial				= $ENV::CASERIAL
+default_md			= sha256
+default_days			= 365
 default_crl_days		= 365
-
+unique_subject			= yes
+email_in_dn			= yes
+policy				= CA_sign_policy

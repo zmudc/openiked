@@ -1,4 +1,4 @@
-/*	$OpenBSD: dh.c,v 1.17 2015/08/21 11:59:27 reyk Exp $	*/
+/*	$OpenBSD: dh.c,v 1.22 2019/04/02 09:42:55 sthen Exp $	*/
 
 /*
  * Copyright (c) 2010-2014 Reyk Floeter <reyk@openbsd.org>
@@ -38,10 +38,13 @@ int	modp_create_shared(struct group *, uint8_t *, uint8_t *);
 /* EC2N/ECP */
 int	ec_init(struct group *);
 int	ec_getlen(struct group *);
+int	ec_secretlen(struct group *);
 int	ec_create_exchange(struct group *, uint8_t *);
 int	ec_create_shared(struct group *, uint8_t *, uint8_t *);
 
-int	ec_point2raw(struct group *, const EC_POINT *, uint8_t *, size_t);
+#define EC_POINT2RAW_FULL	0
+#define EC_POINT2RAW_XONLY	1
+int	ec_point2raw(struct group *, const EC_POINT *, uint8_t *, size_t, int);
 EC_POINT *
 	ec_raw2point(struct group *, uint8_t *, size_t);
 
@@ -63,7 +66,7 @@ extern int crypto_scalarmult_curve25519(unsigned char a[CURVE25519_SIZE],
 	__attribute__((__bounded__(__minbytes__, 2, CURVE25519_SIZE)))
 	__attribute__((__bounded__(__minbytes__, 3, CURVE25519_SIZE)));
 
-struct group_id ike_groups[] = {
+const struct group_id ike_groups[] = {
 	{ GROUP_MODP, 1, 768,
 	    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD1"
 	    "29024E088A67CC74020BBEA63B139B22514A08798E3404DD"
@@ -235,77 +238,13 @@ struct group_id ike_groups[] = {
 	{ GROUP_ECP, 19, 256, NULL, NULL, NID_X9_62_prime256v1 },
 	{ GROUP_ECP, 20, 384, NULL, NULL, NID_secp384r1 },
 	{ GROUP_ECP, 21, 521, NULL, NULL, NID_secp521r1 },
-	{ GROUP_MODP, 22, 1024,
-	    "B10B8F96A080E01DDE92DE5EAE5D54EC52C99FBCFB06A3C6"
-	    "9A6A9DCA52D23B616073E28675A23D189838EF1E2EE652C0"
-	    "13ECB4AEA906112324975C3CD49B83BFACCBDD7D90C4BD70"
-	    "98488E9C219A73724EFFD6FAE5644738FAA31A4FF55BCCC0"
-	    "A151AF5F0DC8B4BD45BF37DF365C1A65E68CFDA76D4DA708"
-	    "DF1FB2BC2E4A4371",
-	    "A4D1CBD5C3FD34126765A442EFB99905F8104DD258AC507F"
-	    "D6406CFF14266D31266FEA1E5C41564B777E690F5504F213"
-	    "160217B4B01B886A5E91547F9E2749F4D7FBD7D3B9A92EE1"
-	    "909D0D2263F80A76A6A24C087A091F531DBF0A0169B6A28A"
-	    "D662A4D18E73AFA32D779D5918D08BC8858F4DCEF97C2A24"
-	    "855E6EEB22B3B2E5"
-	},
-	{ GROUP_MODP, 23, 2048,
-	    "AD107E1E9123A9D0D660FAA79559C51FA20D64E5683B9FD1"
-	    "B54B1597B61D0A75E6FA141DF95A56DBAF9A3C407BA1DF15"
-	    "EB3D688A309C180E1DE6B85A1274A0A66D3F8152AD6AC212"
-	    "9037C9EDEFDA4DF8D91E8FEF55B7394B7AD5B7D0B6C12207"
-	    "C9F98D11ED34DBF6C6BA0B2C8BBC27BE6A00E0A0B9C49708"
-	    "B3BF8A317091883681286130BC8985DB1602E714415D9330"
-	    "278273C7DE31EFDC7310F7121FD5A07415987D9ADC0A486D"
-	    "CDF93ACC44328387315D75E198C641A480CD86A1B9E587E8"
-	    "BE60E69CC928B2B9C52172E413042E9B23F10B0E16E79763"
-	    "C9B53DCF4BA80A29E3FB73C16B8E75B97EF363E2FFA31F71"
-	    "CF9DE5384E71B81C0AC4DFFE0C10E64F",
-	    "AC4032EF4F2D9AE39DF30B5C8FFDAC506CDEBE7B89998CAF"
-	    "74866A08CFE4FFE3A6824A4E10B9A6F0DD921F01A70C4AFA"
-	    "AB739D7700C29F52C57DB17C620A8652BE5E9001A8D66AD7"
-	    "C17669101999024AF4D027275AC1348BB8A762D0521BC98A"
-	    "E247150422EA1ED409939D54DA7460CDB5F6C6B250717CBE"
-	    "F180EB34118E98D119529A45D6F834566E3025E316A330EF"
-	    "BB77A86F0C1AB15B051AE3D428C8F8ACB70A8137150B8EEB"
-	    "10E183EDD19963DDD9E263E4770589EF6AA21E7F5F2FF381"
-	    "B539CCE3409D13CD566AFBB48D6C019181E1BCFE94B30269"
-	    "EDFE72FE9B6AA4BD7B5A0F1C71CFFF4C19C418E1F6EC0179"
-	    "81BC087F2A7065B384B890D3191F2BFA"
-	},
-	{ GROUP_MODP, 24, 2048,
-	    "87A8E61DB4B6663CFFBBD19C651959998CEEF608660DD0F2"
-	    "5D2CEED4435E3B00E00DF8F1D61957D4FAF7DF4561B2AA30"
-	    "16C3D91134096FAA3BF4296D830E9A7C209E0C6497517ABD"
-	    "5A8A9D306BCF67ED91F9E6725B4758C022E0B1EF4275BF7B"
-	    "6C5BFC11D45F9088B941F54EB1E59BB8BC39A0BF12307F5C"
-	    "4FDB70C581B23F76B63ACAE1CAA6B7902D52526735488A0E"
-	    "F13C6D9A51BFA4AB3AD8347796524D8EF6A167B5A41825D9"
-	    "67E144E5140564251CCACB83E6B486F6B3CA3F7971506026"
-	    "C0B857F689962856DED4010ABD0BE621C3A3960A54E710C3"
-	    "75F26375D7014103A4B54330C198AF126116D2276E11715F"
-	    "693877FAD7EF09CADB094AE91E1A1597",
-	    "3FB32C9B73134D0B2E77506660EDBD484CA7B18F21EF2054"
-	    "07F4793A1A0BA12510DBC15077BE463FFF4FED4AAC0BB555"
-	    "BE3A6C1B0C6B47B1BC3773BF7E8C6F62901228F8C28CBB18"
-	    "A55AE31341000A650196F931C77A57F2DDF463E5E9EC144B"
-	    "777DE62AAAB8A8628AC376D282D6ED3864E67982428EBC83"
-	    "1D14348F6F2F9193B5045AF2767164E1DFC967C1FB3F2E55"
-	    "A4BD1BFFE83B9C80D052B985D182EA0ADB2A3B7313D3FE14"
-	    "C8484B1E052588B9B7D2BBD2DF016199ECD06E1557CD0915"
-	    "B3353BBB64E0EC377FD028370DF92B52C7891428CDC67EB6"
-	    "184B523D1DB246C32F63078490F00EF8D647D148D4795451"
-	    "5E2327CFEF98C582664B4C0F6CC41659"
-	},
 	{ GROUP_ECP, 25, 192, NULL, NULL, NID_X9_62_prime192v1 },
 	{ GROUP_ECP, 26, 224, NULL, NULL, NID_secp224r1 },
 	{ GROUP_ECP, 27, 224, NULL, NULL, NID_brainpoolP224r1 },
 	{ GROUP_ECP, 28, 256, NULL, NULL, NID_brainpoolP256r1 },
 	{ GROUP_ECP, 29, 384, NULL, NULL, NID_brainpoolP384r1 },
 	{ GROUP_ECP, 30, 512, NULL, NULL, NID_brainpoolP512r1 },
-
-	/* "Private use" extensions */
-	{ GROUP_CURVE25519, 1034, CURVE25519_SIZE * 8 }
+	{ GROUP_CURVE25519, 31, CURVE25519_SIZE * 8 }
 };
 
 void
@@ -324,11 +263,7 @@ group_free(struct group *group)
 		DH_free(group->dh);
 	if (group->ec != NULL)
 		EC_KEY_free(group->ec);
-	if (group->curve25519 != NULL) {
-		explicit_bzero(group->curve25519,
-		    sizeof(struct curve25519_key));
-		free(group->curve25519);
-	}
+	freezero(group->curve25519, sizeof(struct curve25519_key));
 	group->spec = NULL;
 	free(group);
 }
@@ -336,18 +271,10 @@ group_free(struct group *group)
 struct group *
 group_get(uint32_t id)
 {
-	struct group_id	*p = NULL;
-	struct group	*group;
-	unsigned int	 i, items;
+	const struct group_id	*p;
+	struct group		*group;
 
-	items = sizeof(ike_groups) / sizeof(ike_groups[0]);
-	for (i = 0; i < items; i++) {
-		if (id == ike_groups[i].id) {
-			p = &ike_groups[i];
-			break;
-		}
-	}
-	if (p == NULL)
+	if ((p = group_getid(id)) == NULL)
 		return (NULL);
 
 	if ((group = calloc(1, sizeof(*group))) == NULL)
@@ -367,6 +294,7 @@ group_get(uint32_t id)
 	case GROUP_ECP:
 		group->init = ec_init;
 		group->getlen = ec_getlen;
+		group->secretlen = ec_secretlen;
 		group->exchange = ec_create_exchange;
 		group->shared = ec_create_shared;
 		break;
@@ -389,6 +317,22 @@ group_get(uint32_t id)
 	return (group);
 }
 
+const struct group_id *
+group_getid(uint32_t id)
+{
+	const struct group_id	*p = NULL;
+	unsigned int		 i, items;
+
+	items = sizeof(ike_groups) / sizeof(ike_groups[0]);
+	for (i = 0; i < items; i++) {
+		if (id == ike_groups[i].id) {
+			p = &ike_groups[i];
+			break;
+		}
+	}
+	return (p);
+}
+
 int
 dh_init(struct group *group)
 {
@@ -399,6 +343,15 @@ int
 dh_getlen(struct group *group)
 {
 	return (group->getlen(group));
+}
+
+int
+dh_secretlen(struct group *group)
+{
+	if (group->secretlen)
+		return (group->secretlen(group));
+	else
+		return (group->getlen(group));
 }
 
 int
@@ -508,6 +461,20 @@ ec_getlen(struct group *group)
 	return ((roundup(group->spec->bits, 8) * 2) / 8);
 }
 
+/*
+ * Note that the shared secret only includes the x value:
+ *
+ * See RFC 5903, 7. ECP Key Exchange Data Formats:
+ *   The Diffie-Hellman shared secret value consists of the x value of the
+ *   Diffie-Hellman common value.
+ * See also RFC 5903, 9. Changes from RFC 4753.
+ */
+int
+ec_secretlen(struct group *group)
+{
+	return (ec_getlen(group) / 2);
+}
+
 int
 ec_create_exchange(struct group *group, uint8_t *buf)
 {
@@ -517,7 +484,7 @@ ec_create_exchange(struct group *group, uint8_t *buf)
 	bzero(buf, len);
 
 	return (ec_point2raw(group, EC_KEY_get0_public_key(group->ec),
-	    buf, len));
+	    buf, len, EC_POINT2RAW_FULL));
 }
 
 int
@@ -554,7 +521,8 @@ ec_create_shared(struct group *group, uint8_t *secret, uint8_t *exchange)
 	if (!EC_POINT_mul(ecgroup, secretp, NULL, exchangep, privkey, NULL))
 		goto done;
 
-	ret = ec_point2raw(group, secretp, secret, ec_getlen(group));
+	ret = ec_point2raw(group, secretp, secret, ec_secretlen(group),
+	    EC_POINT2RAW_XONLY);
 
  done:
 	if (exkey != NULL)
@@ -569,7 +537,7 @@ ec_create_shared(struct group *group, uint8_t *secret, uint8_t *exchange)
 
 int
 ec_point2raw(struct group *group, const EC_POINT *point,
-    uint8_t *buf, size_t len)
+    uint8_t *buf, size_t len, int mode)
 {
 	const EC_GROUP	*ecgroup = NULL;
 	BN_CTX		*bnctx = NULL;
@@ -586,9 +554,19 @@ ec_point2raw(struct group *group, const EC_POINT *point,
 		goto done;
 
 	eclen = ec_getlen(group);
-	if (len < eclen)
+	switch (mode) {
+	case EC_POINT2RAW_XONLY:
+		xlen = eclen / 2;
+		ylen = 0;
+		break;
+	case EC_POINT2RAW_FULL:
+		xlen = ylen = eclen / 2;
+		break;
+	default:
 		goto done;
-	xlen = ylen = eclen / 2;
+	}
+	if (len < xlen + ylen)
+		goto done;
 
 	if ((ecgroup = EC_KEY_get0_group(group->ec)) == NULL)
 		goto done;
@@ -609,10 +587,12 @@ ec_point2raw(struct group *group, const EC_POINT *point,
 	if (!BN_bn2bin(x, buf + xoff))
 		goto done;
 
-	yoff = (ylen - BN_num_bytes(y)) + xlen;
-	bzero(buf + xlen, yoff - xlen);
-	if (!BN_bn2bin(y, buf + yoff))
-		goto done;
+	if (ylen > 0) {
+		yoff = (ylen - BN_num_bytes(y)) + xlen;
+		bzero(buf + xlen, yoff - xlen);
+		if (!BN_bn2bin(y, buf + yoff))
+			goto done;
+	}
 
 	ret = 0;
  done:

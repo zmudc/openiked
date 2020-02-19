@@ -1,4 +1,4 @@
-/*	$OpenBSD: policy.c,v 1.40 2015/10/01 10:59:23 reyk Exp $	*/
+/*	$OpenBSD: policy.c,v 1.54 2020/01/07 15:08:28 tobhe Exp $	*/
 
 /*
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
@@ -41,12 +41,17 @@ static __inline int
 	 childsa_cmp(struct iked_childsa *, struct iked_childsa *);
 static __inline int
 	 flow_cmp(struct iked_flow *, struct iked_flow *);
+static __inline int
+	 addr_cmp(struct iked_addr *, struct iked_addr *, int);
+static __inline int
+	 ts_insert_unique(struct iked_addr *, struct iked_tss *, int);
 
 
 void
 policy_init(struct iked *env)
 {
 	TAILQ_INIT(&env->sc_policies);
+	TAILQ_INIT(&env->sc_ocsp);
 	RB_INIT(&env->sc_users);
 	RB_INIT(&env->sc_sas);
 	RB_INIT(&env->sc_activesas);
@@ -239,14 +244,15 @@ sa_state(struct iked *env, struct iked_sa *sa, int state)
 	sa->sa_state = state;
 	if (ostate != IKEV2_STATE_INIT &&
 	    !sa_stateok(sa, state)) {
-		log_debug("%s: cannot switch: %s -> %s", __func__, a, b);
+		log_debug("%s: cannot switch: %s -> %s",
+		    SPI_SA(sa, __func__), a, b);
 		sa->sa_state = ostate;
 	} else if (ostate != sa->sa_state) {
 		switch (state) {
 		case IKEV2_STATE_ESTABLISHED:
 		case IKEV2_STATE_CLOSED:
-			log_info("%s: %s -> %s from %s to %s policy '%s'",
-			    __func__, a, b,
+			log_debug("%s: %s -> %s from %s to %s policy '%s'",
+			    SPI_SA(sa, __func__), a, b,
 			    print_host((struct sockaddr *)&sa->sa_peer.addr,
 			    NULL, 0),
 			    print_host((struct sockaddr *)&sa->sa_local.addr,
@@ -255,7 +261,8 @@ sa_state(struct iked *env, struct iked_sa *sa, int state)
 			    "<unknown>");
 			break;
 		default:
-			log_debug("%s: %s -> %s", __func__, a, b);
+			log_debug("%s: %s -> %s",
+			    SPI_SA(sa, __func__), a, b);
 			break;
 		}
 	}
@@ -342,7 +349,15 @@ sa_new(struct iked *env, uint64_t ispi, uint64_t rspi,
 	if (initiator && sa->sa_hdr.sh_rspi == 0 && rspi)
 		sa->sa_hdr.sh_rspi = rspi;
 
-	if (sa->sa_policy == NULL) {
+	if (pol == NULL && sa->sa_policy == NULL)
+		fatalx("%s: sa %p no policy", __func__, sa);
+	else if (sa->sa_policy == NULL) {
+		/* Increment refcount if the policy has refcounting enabled. */
+		if (pol->pol_flags & IKED_POLICY_REFCNT) {
+			log_info("%s: sa %p old pol %p pol_refcnt %d",
+			    __func__, sa, pol, pol->pol_refcnt);
+			policy_ref(env, pol);
+		}
 		sa->sa_policy = pol;
 		TAILQ_INSERT_TAIL(&pol->pol_sapeers, sa, sa_peer_entry);
 	} else
@@ -368,6 +383,7 @@ sa_new(struct iked *env, uint64_t ispi, uint64_t rspi,
 	if (!ibuf_length(localid->id_buf) && pol != NULL &&
 	    ikev2_policy2id(&pol->pol_localid, localid, 1) != 0) {
 		log_debug("%s: failed to get local id", __func__);
+		ikev2_ike_sa_setreason(sa, "failed to get local id");
 		sa_free(env, sa);
 		return (NULL);
 	}
@@ -375,17 +391,93 @@ sa_new(struct iked *env, uint64_t ispi, uint64_t rspi,
 	return (sa);
 }
 
+int
+policy_generate_ts(struct iked_policy *pol)
+{
+	struct iked_flow	*flow;
+
+	/* Generate list of traffic selectors from flows */
+	RB_FOREACH(flow, iked_flows, &pol->pol_flows) {
+		if (ts_insert_unique(&flow->flow_src, &pol->pol_tssrc,
+		    flow->flow_ipproto) == 1)
+			pol->pol_tssrc_count++;
+		if (ts_insert_unique(&flow->flow_dst, &pol->pol_tsdst,
+		    flow->flow_ipproto) == 1)
+			pol->pol_tsdst_count++;
+	}
+	if (pol->pol_tssrc_count > IKEV2_MAXNUM_TSS ||
+	    pol->pol_tsdst_count > IKEV2_MAXNUM_TSS)
+		return (-1);
+
+	return (0);
+}
+
+int
+ts_insert_unique(struct iked_addr *addr, struct iked_tss *tss, int ipproto)
+{
+	struct iked_ts		*ts;
+
+	/* Remove duplicates */
+	TAILQ_FOREACH(ts, tss, ts_entry) {
+		if (addr_cmp(addr, &ts->ts_addr, 1) == 0)
+			return (0);
+	}
+
+	if ((ts = calloc(1, sizeof(*ts))) == NULL)
+		return (-1);
+
+	ts->ts_ipproto = ipproto;
+	ts->ts_addr = *addr;
+
+	TAILQ_INSERT_TAIL(tss, ts, ts_entry);
+	return (1);
+}
+
 void
 sa_free(struct iked *env, struct iked_sa *sa)
 {
-	log_debug("%s: ispi %s rspi %s", __func__,
-	    print_spi(sa->sa_hdr.sh_ispi, 8),
-	    print_spi(sa->sa_hdr.sh_rspi, 8));
+	struct iked_sa	*osa;
 
-	/* IKE rekeying running? */
-	if (sa->sa_next) {
-		RB_REMOVE(iked_sas, &env->sc_sas, sa->sa_next);
-		config_free_sa(env, sa->sa_next);
+	if (sa->sa_reason)
+		log_info("%s: %s", SPI_SA(sa, __func__), sa->sa_reason);
+	else
+		log_debug("%s: ispi %s rspi %s", SPI_SA(sa, __func__),
+		    print_spi(sa->sa_hdr.sh_ispi, 8),
+		    print_spi(sa->sa_hdr.sh_rspi, 8));
+
+	/* IKE rekeying running? (old sa freed before new sa) */
+	if (sa->sa_nexti) {
+		RB_REMOVE(iked_sas, &env->sc_sas, sa->sa_nexti);
+		config_free_sa(env, sa->sa_nexti);
+	}
+	if (sa->sa_nextr) {
+		RB_REMOVE(iked_sas, &env->sc_sas, sa->sa_nextr);
+		config_free_sa(env, sa->sa_nextr);
+	}
+	/* reset matching backpointers (new sa freed before old sa) */
+	if ((osa = sa->sa_previ) != NULL) {
+		if (osa->sa_nexti == sa) {
+			log_debug("%s: resetting: sa %p == osa->sa_nexti %p"
+			    " (osa %p)",
+			    SPI_SA(sa, __func__), osa, sa, osa->sa_nexti);
+			osa->sa_nexti = NULL;
+		} else {
+			log_info("%s: inconsistent: sa %p != osa->sa_nexti %p"
+			    " (osa %p)",
+			    SPI_SA(sa, __func__), osa, sa, osa->sa_nexti);
+		}
+	}
+	if ((osa = sa->sa_prevr) != NULL) {
+		if (osa->sa_nextr == sa) {
+			log_debug("%s: resetting: sa %p == osa->sa_nextr %p"
+			    " (osa %p)",
+			    SPI_SA(sa, __func__), osa, sa, osa->sa_nextr);
+			osa->sa_nextr = NULL;
+		} else {
+			log_info("%s: inconsistent: sa %p != osa->sa_nextr %p"
+			    " (osa %p)",
+			    SPI_SA(sa, __func__), osa, sa, osa->sa_nextr);
+		}
 	}
 	RB_REMOVE(iked_sas, &env->sc_sas, sa);
 	config_free_sa(env, sa);
@@ -428,14 +520,17 @@ sa_address(struct iked_sa *sa, struct iked_addr *addr,
 void
 childsa_free(struct iked_childsa *csa)
 {
-	if (csa->csa_children) {
-		/* XXX should not happen */
-		log_warnx("%s: trying to remove CSA %p children %u",
-		    __func__, csa, csa->csa_children);
+	struct iked_childsa *csb;
+
+	if (csa == NULL)
 		return;
-	}
-	if (csa->csa_parent)
-		csa->csa_parent->csa_children--;
+
+	if (csa->csa_loaded)
+		log_info("%s: csa %p is still loaded", __func__, csa);
+	if ((csb = csa->csa_bundled) != NULL)
+		csb->csa_bundled = NULL;
+	if ((csb = csa->csa_peersa) != NULL)
+		csb->csa_peersa = NULL;
 	ibuf_release(csa->csa_encrkey);
 	ibuf_release(csa->csa_integrkey);
 	free(csa);
@@ -521,6 +616,13 @@ sa_addrpool_cmp(struct iked_sa *a, struct iked_sa *b)
 	    (struct sockaddr *)&b->sa_addrpool->addr, -1));
 }
 
+static __inline int
+sa_addrpool6_cmp(struct iked_sa *a, struct iked_sa *b)
+{
+	return (sockaddr_cmp((struct sockaddr *)&a->sa_addrpool6->addr,
+	    (struct sockaddr *)&b->sa_addrpool6->addr, -1));
+}
+
 struct iked_user *
 user_lookup(struct iked *env, const char *user)
 {
@@ -569,20 +671,29 @@ flow_cmp(struct iked_flow *a, struct iked_flow *b)
 {
 	int		diff = 0;
 
-	if (a->flow_peer && b->flow_peer)
-		diff = addr_cmp(a->flow_peer, b->flow_peer, 0);
+	if (!diff)
+		diff = (int)a->flow_ipproto - (int)b->flow_ipproto;
+	if (!diff)
+		diff = (int)a->flow_saproto - (int)b->flow_saproto;
+	if (!diff)
+		diff = (int)a->flow_dir - (int)b->flow_dir;
 	if (!diff)
 		diff = addr_cmp(&a->flow_dst, &b->flow_dst, 1);
 	if (!diff)
 		diff = addr_cmp(&a->flow_src, &b->flow_src, 1);
-	if (!diff && a->flow_dir && b->flow_dir)
-		diff = (int)a->flow_dir - (int)b->flow_dir;
 
 	return (diff);
 }
 
+int
+flow_equal(struct iked_flow *a, struct iked_flow *b)
+{
+	return (flow_cmp(a, b) == 0);
+}
+
 RB_GENERATE(iked_sas, iked_sa, sa_entry, sa_cmp);
 RB_GENERATE(iked_addrpool, iked_sa, sa_addrpool_entry, sa_addrpool_cmp);
+RB_GENERATE(iked_addrpool6, iked_sa, sa_addrpool6_entry, sa_addrpool6_cmp);
 RB_GENERATE(iked_users, iked_user, usr_entry, user_cmp);
 RB_GENERATE(iked_activesas, iked_childsa, csa_node, childsa_cmp);
 RB_GENERATE(iked_flows, iked_flow, flow_node, flow_cmp);

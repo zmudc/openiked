@@ -1,6 +1,7 @@
-/*	$OpenBSD: ikev2_pld.c,v 1.54 2015/10/01 13:57:29 sthen Exp $	*/
+/*	$OpenBSD: ikev2_pld.c,v 1.76 2019/11/28 12:16:28 tobhe Exp $	*/
 
 /*
+ * Copyright (c) 2019 Tobias Heider <tobias.heider@stusta.de>
  * Copyright (c) 2010-2013 Reyk Floeter <reyk@openbsd.org>
  * Copyright (c) 2014 Hans-Joerg Hoexer
  *
@@ -48,7 +49,7 @@ int	 ikev2_validate_pld(struct iked_message *, size_t, size_t,
 int	 ikev2_pld_payloads(struct iked *, struct iked_message *,
 	    size_t, size_t, unsigned int);
 int	 ikev2_validate_sa(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_sa_proposal *);
+	    struct ikev2_sa_proposal *);
 int	 ikev2_pld_sa(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_xform(struct iked_message *, size_t, size_t,
@@ -60,49 +61,51 @@ int	 ikev2_validate_attr(struct iked_message *, size_t, size_t,
 int	 ikev2_pld_attr(struct iked *, struct ikev2_transform *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_ke(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_keyexchange *);
+	    struct ikev2_keyexchange *);
 int	 ikev2_pld_ke(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_id(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_id *);
+	    struct ikev2_id *);
 int	 ikev2_pld_id(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t, unsigned int);
 int	 ikev2_validate_cert(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_cert *);
+	    struct ikev2_cert *);
 int	 ikev2_pld_cert(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_certreq(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_cert *);
+	    struct ikev2_cert *);
 int	 ikev2_pld_certreq(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
-int	 ikev2_validate_nonce(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *);
 int	 ikev2_pld_nonce(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_notify(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_notify *);
+	    struct ikev2_notify *);
 int	 ikev2_pld_notify(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_delete(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_delete *);
+	    struct ikev2_delete *);
 int	 ikev2_pld_delete(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_ts(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_tsp *);
+	    struct ikev2_tsp *);
 int	 ikev2_pld_ts(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t, unsigned int);
 int	 ikev2_validate_auth(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_auth *);
+	    struct ikev2_auth *);
 int	 ikev2_pld_auth(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_pld_e(struct iked *, struct ikev2_payload *,
-	    struct iked_message *, size_t);
+	    struct iked_message *, size_t, size_t);
+int	 ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
+	    struct iked_message *msg, size_t offset, size_t left);
+int	 ikev2_frags_reassemble(struct iked *env,
+	    struct ikev2_payload *pld, struct iked_message *msg);
 int	 ikev2_validate_cp(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct ikev2_cp *);
+	    struct ikev2_cp *);
 int	 ikev2_pld_cp(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 int	 ikev2_validate_eap(struct iked_message *, size_t, size_t,
-	    struct ikev2_payload *, struct eap_header *);
+	    struct eap_header *);
 int	 ikev2_pld_eap(struct iked *, struct ikev2_payload *,
 	    struct iked_message *, size_t, size_t);
 
@@ -112,7 +115,7 @@ ikev2_pld_parse(struct iked *env, struct ike_header *hdr,
 {
 	log_debug("%s: header ispi %s rspi %s"
 	    " nextpayload %s version 0x%02x exchange %s flags 0x%02x"
-	    " msgid %d length %d response %d", __func__,
+	    " msgid %d length %u response %d", __func__,
 	    print_spi(betoh64(hdr->ike_ispi), 8),
 	    print_spi(betoh64(hdr->ike_rspi), 8),
 	    print_map(hdr->ike_nextpayload, ikev2_payload_map),
@@ -182,16 +185,16 @@ ikev2_pld_payloads(struct iked *env, struct iked_message *msg,
 	unsigned int		 e;
 	int			 ret;
 	uint8_t			*msgbuf = ibuf_data(msg->msg_data);
-	size_t			 left;
+	size_t			 total, left;
 
 	/* Check if message was decrypted in an E payload */
 	e = msg->msg_e ? IKED_E : 0;
 
-	while (payload != 0 && offset < length) {
-		/* Bytes left in datagram. */
-		left = length - offset;
+	/* Bytes left in datagram. */
+	total = length - offset;
 
-		if (ikev2_validate_pld(msg, offset, left, &pld))
+	while (payload != 0 && offset < length) {
+		if (ikev2_validate_pld(msg, offset, total, &pld))
 			return (-1);
 
 		log_debug("%s: %spayload %s"
@@ -204,7 +207,8 @@ ikev2_pld_payloads(struct iked *env, struct iked_message *msg,
 
 		/* Skip over generic payload header. */
 		offset += sizeof(pld);
-		left -= sizeof(pld);
+		total -= sizeof(pld);
+		left = betoh16(pld.pld_length) - sizeof(pld);
 		ret = 0;
 
 		switch (payload | e) {
@@ -248,7 +252,10 @@ ikev2_pld_payloads(struct iked *env, struct iked_message *msg,
 			    payload);
 			break;
 		case IKEV2_PAYLOAD_SK:
-			ret = ikev2_pld_e(env, &pld, msg, offset);
+			ret = ikev2_pld_e(env, &pld, msg, offset, left);
+			break;
+		case IKEV2_PAYLOAD_SKF:
+			ret = ikev2_pld_ef(env, &pld, msg, offset, left);
 			break;
 		case IKEV2_PAYLOAD_CP | IKED_E:
 			ret = ikev2_pld_cp(env, &pld, msg, offset, left);
@@ -267,12 +274,14 @@ ikev2_pld_payloads(struct iked *env, struct iked_message *msg,
 			return (-1);
 		}
 
-		/* Encrypted payload must appear last */
-		if (payload == IKEV2_PAYLOAD_SK)
+		/* Encrypted payloads must appear last */
+		if ((payload == IKEV2_PAYLOAD_SK) ||
+		    (payload == IKEV2_PAYLOAD_SKF))
 			return (0);
 
 		payload = pld.pld_nextpayload;
-		offset += betoh16(pld.pld_length) - sizeof(pld);
+		offset += left;
+		total -= left;
 	}
 
 	return (0);
@@ -280,20 +289,11 @@ ikev2_pld_payloads(struct iked *env, struct iked_message *msg,
 
 int
 ikev2_validate_sa(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_sa_proposal *sap)
+    struct ikev2_sa_proposal *sap)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length, sap_length;
+	size_t		 sap_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*sap)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*sap));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*sap)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*sap));
@@ -313,42 +313,28 @@ ikev2_validate_sa(struct iked_message *msg, size_t offset, size_t left,
 		return (-1);
 	}
 	/*
-	 * NB: There might be more proposals, we parse only the first one.
-	 * This condition must never be true.
-	 */
-	if (pld_length - sizeof(*pld) < sap_length) {
-		log_debug("%s: payload malformed: SA payload length mismatches "
-		    "proposal substructure length (%lu < %zu)", __func__,
-		    pld_length - sizeof(*pld), sap_length);
-		return (-1);
-	}
-	/*
 	 * If there is only one proposal, sap_length must be the
 	 * total payload size.
 	 */
-	if (!sap->sap_more && ((pld_length - sizeof(*pld)) != sap_length)) {
-		log_debug("%s: payload malformed: SA payload length mismatches "
+	if (!sap->sap_more && left != sap_length) {
+		log_debug("%s: malformed payload: SA payload length mismatches "
 		    "single proposal substructure length (%lu != %zu)",
-		    __func__, pld_length - sizeof(*pld), sap_length);
+		    __func__, left, sap_length);
 		return (-1);
 	}
 	/*
 	 * If there are more than one proposal, there must be bytes
 	 * left in the payload.
 	 */
-	if (sap->sap_more && ((pld_length - sizeof(*pld)) <= sap_length)) {
-		log_debug("%s: payload malformed: SA payload too small for "
+	if (sap->sap_more && left <= sap_length) {
+		log_debug("%s: malformed payload: SA payload too small for "
 		    "further proposals (%zu <= %zu)", __func__,
-		    pld_length - sizeof(*pld), sap_length);
+		    left, sap_length);
 		return (-1);
 	}
 	return (0);
 }
 
-/*
- * NB: This function parses both the SA header and the first proposal.
- * Additional proposals are ignored.
- */
 int
 ikev2_pld_sa(struct iked *env, struct ikev2_payload *pld,
     struct iked_message *msg, size_t offset, size_t left)
@@ -361,100 +347,97 @@ ikev2_pld_sa(struct iked *env, struct ikev2_payload *pld,
 	struct iked_proposals		*props;
 	size_t				 total;
 
-	if (ikev2_validate_sa(msg, offset, left, pld, &sap))
-		return (-1);
+	do {
+		if (ikev2_validate_sa(msg, offset, left, &sap))
+			return (-1);
 
-	if (sap.sap_more)
-		log_debug("%s: more than one proposal specified", __func__);
+		/* Assumed size of the first proposals, including SPI if present. */
+		total = (betoh16(sap.sap_length) - sizeof(sap));
 
-	/* Assumed size of the first proposals, including SPI if present. */
-	total = (betoh16(sap.sap_length) - sizeof(sap));
+		props = &msg->msg_parent->msg_proposals;
 
-	props = &msg->msg_parent->msg_proposals;
+		offset += sizeof(sap);
+		left -= sizeof(sap);
 
-	offset += sizeof(sap);
-	left -= sizeof(sap);
+		if (sap.sap_spisize) {
+			if (left < sap.sap_spisize) {
+				log_debug("%s: malformed payload: SPI larger than "
+				    "actual payload (%zu < %d)", __func__, left,
+				    sap.sap_spisize);
+				return (-1);
+			}
+			if (total < sap.sap_spisize) {
+				log_debug("%s: malformed payload: SPI larger than "
+				    "proposal (%zu < %d)", __func__, total,
+				    sap.sap_spisize);
+				return (-1);
+			}
+			switch (sap.sap_spisize) {
+			case 4:
+				memcpy(&spi32, msgbuf + offset, 4);
+				spi = betoh32(spi32);
+				break;
+			case 8:
+				memcpy(&spi64, msgbuf + offset, 8);
+				spi = betoh64(spi64);
+				break;
+			default:
+				log_debug("%s: unsupported SPI size %d",
+				    __func__, sap.sap_spisize);
+				return (-1);
+			}
 
-	if (sap.sap_spisize) {
-		if (left < sap.sap_spisize) {
-			log_debug("%s: malformed payload: SPI larger than "
-			    "actual payload (%zu < %d)", __func__, left,
-			    sap.sap_spisize);
+			offset += sap.sap_spisize;
+			left -= sap.sap_spisize;
+
+			/* Assumed size of the proposal, now without SPI. */
+			total -= sap.sap_spisize;
+		}
+
+		/*
+		 * As we verified sanity of packet headers, this check will
+		 * be always false, but just to be sure we keep it.
+		 */
+		if (left < total) {
+			log_debug("%s: malformed payload: too long for payload "
+			    "(%zu < %zu)", __func__, left, total);
 			return (-1);
 		}
-		if (total < sap.sap_spisize) {
-			log_debug("%s: malformed payload: SPI larger than "
-			    "proposal (%zu < %d)", __func__, total,
-			    sap.sap_spisize);
-			return (-1);
-		}
-		if (total < sap.sap_spisize) {
-			log_debug("%s: malformed payload: SPI too large "
-			    "(%zu < %d)", __func__, total, sap.sap_spisize);
-			return (-1);
-		}
-		switch (sap.sap_spisize) {
-		case 4:
-			memcpy(&spi32, msgbuf + offset, 4);
-			spi = betoh32(spi32);
-			break;
-		case 8:
-			memcpy(&spi64, msgbuf + offset, 8);
-			spi = betoh64(spi64);
-			break;
-		default:
-			log_debug("%s: unsupported SPI size %d",
-			    __func__, sap.sap_spisize);
-			return (-1);
+
+		log_debug("%s: more %d reserved %d length %d"
+		    " proposal #%d protoid %s spisize %d xforms %d spi %s",
+		    __func__, sap.sap_more, sap.sap_reserved,
+		    betoh16(sap.sap_length), sap.sap_proposalnr,
+		    print_map(sap.sap_protoid, ikev2_saproto_map), sap.sap_spisize,
+		    sap.sap_transforms, print_spi(spi, sap.sap_spisize));
+
+		if (ikev2_msg_frompeer(msg)) {
+			if ((msg->msg_parent->msg_prop = config_add_proposal(props,
+			    sap.sap_proposalnr, sap.sap_protoid)) == NULL) {
+				log_debug("%s: invalid proposal", __func__);
+				return (-1);
+			}
+			prop = msg->msg_parent->msg_prop;
+			prop->prop_peerspi.spi = spi;
+			prop->prop_peerspi.spi_protoid = sap.sap_protoid;
+			prop->prop_peerspi.spi_size = sap.sap_spisize;
+
+			prop->prop_localspi.spi_protoid = sap.sap_protoid;
+			prop->prop_localspi.spi_size = sap.sap_spisize;
 		}
 
-		offset += sap.sap_spisize;
-		left -= sap.sap_spisize;
-
-		/* Assumed size of the proposal, now without SPI. */
-		total -= sap.sap_spisize;
-	}
-
-	/*
-	 * As we verified sanity of packet headers, this check will
-	 * be always false, but just to be sure we keep it.
-	 */
-	if (left < total) {
-		log_debug("%s: payload malformed: too long for payload "
-		    "(%zu < %zu)", __func__, left, total);
-		return (-1);
-	}
-
-	log_debug("%s: more %d reserved %d length %d"
-	    " proposal #%d protoid %s spisize %d xforms %d spi %s",
-	    __func__, sap.sap_more, sap.sap_reserved,
-	    betoh16(sap.sap_length), sap.sap_proposalnr,
-	    print_map(sap.sap_protoid, ikev2_saproto_map), sap.sap_spisize,
-	    sap.sap_transforms, print_spi(spi, sap.sap_spisize));
-
-	if (ikev2_msg_frompeer(msg)) {
-		if ((msg->msg_parent->msg_prop = config_add_proposal(props,
-		    sap.sap_proposalnr, sap.sap_protoid)) == NULL) {
-			log_debug("%s: invalid proposal", __func__);
+		/*
+		 * Parse the attached transforms
+		 */
+		if (sap.sap_transforms &&
+		    ikev2_pld_xform(env, &sap, msg, offset, total) != 0) {
+			log_debug("%s: invalid proposal transforms", __func__);
 			return (-1);
 		}
-		prop = msg->msg_parent->msg_prop;
-		prop->prop_peerspi.spi = spi;
-		prop->prop_peerspi.spi_protoid = sap.sap_protoid;
-		prop->prop_peerspi.spi_size = sap.sap_spisize;
 
-		prop->prop_localspi.spi_protoid = sap.sap_protoid;
-		prop->prop_localspi.spi_size = sap.sap_spisize;
-	}
-
-	/*
-	 * Parse the attached transforms
-	 */
-	if (sap.sap_transforms &&
-	    ikev2_pld_xform(env, &sap, msg, offset, total) != 0) {
-		log_debug("%s: invalid proposal transforms", __func__);
-		return (-1);
-	}
+		offset += total;
+		left -= total;
+	} while (sap.sap_more);
 
 	return (0);
 }
@@ -467,7 +450,7 @@ ikev2_validate_xform(struct iked_message *msg, size_t offset, size_t total,
 	size_t		 xfrm_length;
 
 	if (total < sizeof(*xfrm)) {
-		log_debug("%s: payload malformed: too short for header "
+		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, total, sizeof(*xfrm));
 		return (-1);
 	}
@@ -475,8 +458,8 @@ ikev2_validate_xform(struct iked_message *msg, size_t offset, size_t total,
 
 	xfrm_length = betoh16(xfrm->xfrm_length);
 	if (xfrm_length < sizeof(*xfrm)) {
-		log_debug("%s: payload malformed: shorter than minimal header "
-		    "(%zu < %zu)", __func__, xfrm_length, sizeof(*xfrm));
+		log_debug("%s: malformed payload: shorter than minimum header "
+		    "size (%zu < %zu)", __func__, xfrm_length, sizeof(*xfrm));
 		return (-1);
 	}
 	if (total < xfrm_length) {
@@ -575,7 +558,7 @@ ikev2_validate_attr(struct iked_message *msg, size_t offset, size_t total,
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
 
 	if (total < sizeof(*attr)) {
-		log_debug("%s: payload malformed: too short for header "
+		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, total, sizeof(*attr));
 		return (-1);
 	}
@@ -614,13 +597,13 @@ ikev2_pld_attr(struct iked *env, struct ikev2_transform *xfrm,
 		/* Type-Length-Value attribute */
 		attr_length = betoh16(attr.attr_length);
 		if (attr_length < sizeof(attr)) {
-			log_debug("%s: payload malformed: shorter than "
-			    "minimal header (%zu < %zu)", __func__,
+			log_debug("%s: malformed payload: shorter than "
+			    "minimum header size (%zu < %zu)", __func__,
 			    attr_length, sizeof(attr));
 			return (-1);
 		}
 		if (total < attr_length) {
-			log_debug("%s: payload malformed: attribute larger "
+			log_debug("%s: malformed payload: attribute larger "
 			    "than actual payload (%zu < %zu)", __func__,
 			    total, attr_length);
 			return (-1);
@@ -641,20 +624,10 @@ ikev2_pld_attr(struct iked *env, struct ikev2_transform *xfrm,
 
 int
 ikev2_validate_ke(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_keyexchange *kex)
+    struct ikev2_keyexchange *kex)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*kex)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*kex));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*kex)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*kex));
@@ -674,7 +647,7 @@ ikev2_pld_ke(struct iked *env, struct ikev2_payload *pld,
 	size_t				 len;
 	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 
-	if (ikev2_validate_ke(msg, offset, left, pld, &kex))
+	if (ikev2_validate_ke(msg, offset, left, &kex))
 		return (-1);
 
 	log_debug("%s: dh group %s reserved %d", __func__,
@@ -682,16 +655,10 @@ ikev2_pld_ke(struct iked *env, struct ikev2_payload *pld,
 	    betoh16(kex.kex_reserved));
 
 	buf = msgbuf + offset + sizeof(kex);
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(kex);
+	len = left - sizeof(kex);
 
 	if (len == 0) {
 		log_debug("%s: malformed payload: no KE data given", __func__);
-		return (-1);
-	}
-	/* This will actually be caught by earlier checks. */
-	if (left < len) {
-		log_debug("%s: malformed payload: smaller than specified "
-		     "(%zu < %zu)", __func__, left, len);
 		return (-1);
 	}
 
@@ -703,6 +670,7 @@ ikev2_pld_ke(struct iked *env, struct ikev2_payload *pld,
 			log_debug("%s: failed to get exchange", __func__);
 			return (-1);
 		}
+		msg->msg_parent->msg_dhgroup = betoh16(kex.kex_dhgroup);
 	}
 
 	return (0);
@@ -710,20 +678,10 @@ ikev2_pld_ke(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_id(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_id *id)
+    struct ikev2_id *id)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*id)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*id));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*id)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*id));
@@ -746,14 +704,14 @@ ikev2_pld_id(struct iked *env, struct ikev2_payload *pld,
 	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 	char				 idstr[IKED_ID_SIZE];
 
-	if (ikev2_validate_id(msg, offset, left, pld, &id))
+	if (ikev2_validate_id(msg, offset, left, &id))
 		return (-1);
 
 	bzero(&idb, sizeof(idb));
 
 	/* Don't strip the Id payload header */
 	ptr = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld);
+	len = left;
 
 	idb.id_type = id.id_type;
 	idb.id_offset = sizeof(id);
@@ -793,20 +751,10 @@ ikev2_pld_id(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_cert(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_cert *cert)
+    struct ikev2_cert *cert)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*cert)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*cert));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*cert)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*cert));
@@ -827,12 +775,12 @@ ikev2_pld_cert(struct iked *env, struct ikev2_payload *pld,
 	struct iked_id			*certid;
 	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 
-	if (ikev2_validate_cert(msg, offset, left, pld, &cert))
+	if (ikev2_validate_cert(msg, offset, left, &cert))
 		return (-1);
 	offset += sizeof(cert);
 
 	buf = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(cert);
+	len = left - sizeof(cert);
 
 	log_debug("%s: type %s length %zu",
 	    __func__, print_map(cert.cert_type, ikev2_cert_map), len);
@@ -844,7 +792,8 @@ ikev2_pld_cert(struct iked *env, struct ikev2_payload *pld,
 
 	certid = &msg->msg_parent->msg_cert;
 	if (certid->id_type) {
-		log_debug("%s: duplicate cert payload", __func__);
+		log_info("%s: multiple cert payloads not supported",
+		   SPI_SA(msg->msg_sa, __func__));
 		return (-1);
 	}
 
@@ -860,20 +809,10 @@ ikev2_pld_cert(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_certreq(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_cert *cert)
+    struct ikev2_cert *cert)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*cert)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*cert));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*cert)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*cert));
@@ -888,27 +827,21 @@ int
 ikev2_pld_certreq(struct iked *env, struct ikev2_payload *pld,
     struct iked_message *msg, size_t offset, size_t left)
 {
-	struct iked_sa			*sa = msg->msg_sa;
 	struct ikev2_cert		 cert;
+	struct iked_certreq		*cr;
 	uint8_t				*buf;
 	ssize_t				 len;
 	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 
-	if (ikev2_validate_certreq(msg, offset, left, pld, &cert))
+	if (ikev2_validate_certreq(msg, offset, left, &cert))
 		return (-1);
 	offset += sizeof(cert);
 
 	buf = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(cert);
+	len = left - sizeof(cert);
 
 	log_debug("%s: type %s length %zd",
 	    __func__, print_map(cert.cert_type, ikev2_cert_map), len);
-
-	/* This will actually be caught by earlier checks. */
-	if (len < 0) {
-		log_debug("%s: invalid certificate request length", __func__);
-		return (-1);
-	}
 
 	print_hex(buf, 0, len);
 
@@ -916,45 +849,37 @@ ikev2_pld_certreq(struct iked *env, struct ikev2_payload *pld,
 		return (0);
 
 	if (cert.cert_type == IKEV2_CERT_X509_CERT) {
-		if (!len)
+		if (len == 0) {
+			log_info("%s: invalid length 0", __func__);
 			return (0);
+		}
 		if ((len % SHA_DIGEST_LENGTH) != 0) {
-			log_debug("%s: invalid certificate request", __func__);
+			log_info("%s: invalid certificate request",
+			    __func__);
 			return (-1);
 		}
 	}
 
-	if (msg->msg_sa == NULL)
+	if ((cr = calloc(1, sizeof(struct iked_certreq))) == NULL) {
+		log_info("%s: failed to allocate certreq.", __func__);
 		return (-1);
-
-	/* Optional certreq for PSK */
-	if (sa->sa_hdr.sh_initiator)
-		sa->sa_stateinit |= IKED_REQ_CERT;
-	else
-		sa->sa_statevalid |= IKED_REQ_CERT;
-
-	ca_setreq(env, sa, &sa->sa_policy->pol_localid,
-	    cert.cert_type, buf, len, PROC_CERT);
+	}
+	if ((cr->cr_data = ibuf_new(buf, len)) == NULL) {
+		log_info("%s: failed to allocate buffer.", __func__);
+		return (-1);
+	}
+	cr->cr_type = cert.cert_type;
+	SLIST_INSERT_HEAD(&msg->msg_parent->msg_certreqs, cr, cr_entry);
 
 	return (0);
 }
 
 int
 ikev2_validate_auth(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_auth *auth)
+    struct ikev2_auth *auth)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*auth)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*auth));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*auth)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*auth));
@@ -976,12 +901,12 @@ ikev2_pld_auth(struct iked *env, struct ikev2_payload *pld,
 	struct iked_sa			*sa = msg->msg_sa;
 	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
 
-	if (ikev2_validate_auth(msg, offset, left, pld, &auth))
+	if (ikev2_validate_auth(msg, offset, left, &auth))
 		return (-1);
 	offset += sizeof(auth);
 
 	buf = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(auth);
+	len = left - sizeof(auth);
 
 	log_debug("%s: method %s length %zu",
 	    __func__, print_map(auth.auth_method, ikev2_auth_map), len);
@@ -1011,24 +936,6 @@ ikev2_pld_auth(struct iked *env, struct ikev2_payload *pld,
 }
 
 int
-ikev2_validate_nonce(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld)
-{
-	size_t		 pld_length;
-
-	/* This will actually be caught by earlier checks. */
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld));
-		return (-1);
-	}
-
-	return (0);
-}
-
-int
 ikev2_pld_nonce(struct iked *env, struct ikev2_payload *pld,
     struct iked_message *msg, size_t offset, size_t left)
 {
@@ -1036,20 +943,11 @@ ikev2_pld_nonce(struct iked *env, struct ikev2_payload *pld,
 	uint8_t		*buf;
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
 
-	if (ikev2_validate_nonce(msg, offset, left, pld))
-		return (-1);
-
 	buf = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld);
+	len = left;
 
 	if (len == 0) {
 		log_debug("%s: malformed payload: no NONCE given", __func__);
-		return (-1);
-	}
-	/* This will actually be caught by earlier checks. */
-	if (left < len) {
-		log_debug("%s: malformed payload: smaller than specified "
-		    "(%zu < %zu)", __func__, left, len);
 		return (-1);
 	}
 
@@ -1069,20 +967,10 @@ ikev2_pld_nonce(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_notify(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_notify *n)
+    struct ikev2_notify *n)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*n)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*n));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*n)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*n));
@@ -1104,12 +992,9 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 	uint64_t		 spi64;
 	struct iked_spi		*rekey;
 	uint16_t		 type;
-	uint16_t		 group;
-	uint16_t		 cpi;
 	uint16_t		 signature_hash;
-	uint8_t			 transform;
 
-	if (ikev2_validate_notify(msg, offset, left, pld, &n))
+	if (ikev2_validate_notify(msg, offset, left, &n))
 		return (-1);
 	type = betoh16(n.n_type);
 
@@ -1118,7 +1003,7 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 	    print_map(n.n_protoid, ikev2_saproto_map), n.n_spisize,
 	    print_map(type, ikev2_n_map));
 
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(n);
+	len = left - sizeof(n);
 	if ((buf = ibuf_seek(msg->msg_data, offset + sizeof(n), len)) == NULL)
 		return (-1);
 
@@ -1138,18 +1023,47 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 		if (ikev2_nat_detection(env, msg, md, sizeof(md), type) == -1)
 			return (-1);
 		if (memcmp(buf, md, len) != 0) {
-			log_debug("%s: %s detected NAT, enabling "
-			    "UDP encapsulation", __func__,
+			log_debug("%s: %s detected NAT", __func__,
 			    print_map(type, ikev2_n_map));
-
-			/*
-			 * Enable UDP encapsulation of ESP packages if
-			 * the check detected NAT.
-			 */
-			if (msg->msg_sa != NULL)
-				msg->msg_sa->sa_udpencap = 1;
+			if (type == IKEV2_N_NAT_DETECTION_SOURCE_IP)
+				msg->msg_parent->msg_nat_detected
+				    |= IKED_MSG_NAT_SRC_IP;
+			else
+				msg->msg_parent->msg_nat_detected
+				    |= IKED_MSG_NAT_DST_IP;
 		}
 		print_hex(md, 0, sizeof(md));
+		/* remember for MOBIKE */
+		msg->msg_parent->msg_natt_rcvd = 1;
+		break;
+	case IKEV2_N_AUTHENTICATION_FAILED:
+		if (!msg->msg_e) {
+			log_debug("%s: AUTHENTICATION_FAILED not encrypted",
+			    __func__);
+			return (-1);
+		}
+		/*
+		 * If we are the responder, then we only accept
+		 * AUTHENTICATION_FAILED from authenticated peers.
+		 * If we are the initiator, the peer cannot be authenticated.
+		 */
+		if (!msg->msg_sa->sa_hdr.sh_initiator) {
+			if (!sa_stateok(msg->msg_sa, IKEV2_STATE_VALID)) {
+				log_debug("%s: ignoring AUTHENTICATION_FAILED"
+				    " from unauthenticated initiator",
+				    __func__);
+				return (-1);
+			}
+		} else {
+			if (sa_stateok(msg->msg_sa, IKEV2_STATE_VALID)) {
+				log_debug("%s: ignoring AUTHENTICATION_FAILED"
+				    " from authenticated responder",
+				    __func__);
+				return (-1);
+			}
+		}
+		msg->msg_parent->msg_flags
+		    |= IKED_MSG_FLAGS_AUTHENTICATION_FAILED;
 		break;
 	case IKEV2_N_INVALID_KE_PAYLOAD:
 		if (sa_stateok(msg->msg_sa, IKEV2_STATE_VALID) &&
@@ -1158,36 +1072,14 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 			    __func__);
 			return (-1);
 		}
-		if (len != sizeof(group)) {
+		if (len != sizeof(msg->msg_parent->msg_group)) {
 			log_debug("%s: malformed payload: group size mismatch"
-			    " (%zu != %zu)", __func__, len, sizeof(group));
+			    " (%zu != %zu)", __func__, len,
+			    sizeof(msg->msg_parent->msg_group));
 			return (-1);
 		}
-		/* XXX chould also happen for PFS */
-		if (!msg->msg_sa->sa_hdr.sh_initiator) {
-			log_debug("%s: not an initiator", __func__);
-			sa_state(env, msg->msg_sa, IKEV2_STATE_CLOSED);
-			msg->msg_sa = NULL;
-			return (-1);
-		}
-		memcpy(&group, buf, len);
-		group = betoh16(group);
-		if ((msg->msg_policy->pol_peerdh = group_get(group))
-		    == NULL) {
-			log_debug("%s: unable to select DH group %d", __func__,
-			    group);
-			return (-1);
-		}
-		log_debug("%s: responder selected DH group %d", __func__,
-		    group);
-		sa_state(env, msg->msg_sa, IKEV2_STATE_CLOSED);
-		msg->msg_sa = NULL;
-
-		/*
-		 * XXX should also happen for PFS so we have to check state.
-		 */
-		timer_set(env, &env->sc_inittmr, ikev2_init_ike_sa, NULL);
-		timer_add(env, &env->sc_inittmr, IKED_INITIATOR_INITIAL);
+		memcpy(&msg->msg_parent->msg_group, buf, len);
+		msg->msg_parent->msg_flags |= IKED_MSG_FLAGS_INVALID_KE;
 		break;
 	case IKEV2_N_NO_ADDITIONAL_SAS:
 		if (!msg->msg_e) {
@@ -1195,11 +1087,7 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 			    __func__);
 			return (-1);
 		}
-		/* This makes sense for Child SAs only atm */
-		if (msg->msg_sa->sa_stateflags & IKED_REQ_CHILDSA) {
-			ikev2_disable_rekeying(env, msg->msg_sa);
-			msg->msg_sa->sa_stateflags &= ~IKED_REQ_CHILDSA;
-		}
+		msg->msg_parent->msg_flags |= IKED_MSG_FLAGS_NO_ADDITIONAL_SAS;
 		break;
 	case IKEV2_N_REKEY_SA:
 		if (!msg->msg_e) {
@@ -1243,21 +1131,121 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 			    __func__);
 			return (-1);
 		}
-		if (len < sizeof(cpi) + sizeof(transform)) {
+		if (len < sizeof(msg->msg_parent->msg_cpi) +
+		    sizeof(msg->msg_parent->msg_transform)) {
 			log_debug("%s: ignoring malformed ipcomp notification",
 			    __func__);
 			return (0);
 		}
-		memcpy(&cpi, buf, sizeof(cpi));
-		memcpy(&transform, buf + sizeof(cpi), sizeof(transform));
-		log_debug("%s: cpi 0x%x, transform %s, len %zu", __func__,
-		    betoh16(cpi), print_map(transform, ikev2_ipcomp_map), len);
-		/* we only support deflate */
-		if ((msg->msg_policy->pol_flags & IKED_POLICY_IPCOMP) &&
-		    (transform == IKEV2_IPCOMP_DEFLATE)) {
-			msg->msg_sa->sa_ipcomp = transform;
-			msg->msg_sa->sa_cpi_out = betoh16(cpi);
+		memcpy(&msg->msg_parent->msg_cpi, buf,
+		    sizeof(msg->msg_parent->msg_cpi));
+		memcpy(&msg->msg_parent->msg_transform,
+		    buf + sizeof(msg->msg_parent->msg_cpi),
+		    sizeof(msg->msg_parent->msg_transform));
+
+		log_debug("%s: %s cpi 0x%x, transform %s, len %zu", __func__,
+		    msg->msg_parent->msg_response ? "res" : "req",
+		    betoh16(msg->msg_parent->msg_cpi),
+		    print_map(msg->msg_parent->msg_transform,
+		    ikev2_ipcomp_map), len);
+
+		msg->msg_parent->msg_flags |= IKED_MSG_FLAGS_IPCOMP_SUPPORTED;
+		break;
+	case IKEV2_N_CHILD_SA_NOT_FOUND:
+		if (!msg->msg_e) {
+			log_debug("%s: N_CHILD_SA_NOT_FOUND not encrypted",
+			    __func__);
+			return (-1);
 		}
+		msg->msg_parent->msg_flags |= IKED_MSG_FLAGS_CHILD_SA_NOT_FOUND;
+		break;
+	case IKEV2_N_MOBIKE_SUPPORTED:
+		if (!msg->msg_e) {
+			log_debug("%s: N_MOBIKE_SUPPORTED not encrypted",
+			    __func__);
+			return (-1);
+		}
+		if (len != 0) {
+			log_debug("%s: ignoring malformed mobike"
+			    " notification: %zu", __func__, len);
+			return (0);
+		}
+		msg->msg_parent->msg_flags |= IKED_MSG_FLAGS_MOBIKE;
+		break;
+	case IKEV2_N_UPDATE_SA_ADDRESSES:
+		if (!msg->msg_e) {
+			log_debug("%s: N_UPDATE_SA_ADDRESSES not encrypted",
+			    __func__);
+			return (-1);
+		}
+		if (!msg->msg_sa->sa_mobike) {
+			log_debug("%s: ignoring update sa addresses"
+			    " notification w/o mobike: %zu", __func__, len);
+			return (0);
+		}
+		if (len != 0) {
+			log_debug("%s: ignoring malformed update sa addresses"
+			    " notification: %zu", __func__, len);
+			return (0);
+		}
+		msg->msg_parent->msg_update_sa_addresses = 1;
+		break;
+	case IKEV2_N_COOKIE2:
+		if (!msg->msg_e) {
+			log_debug("%s: N_COOKIE2 not encrypted",
+			    __func__);
+			return (-1);
+		}
+		if (!msg->msg_sa->sa_mobike) {
+			log_debug("%s: ignoring cookie2 notification"
+			    " w/o mobike: %zu", __func__, len);
+			return (0);
+		}
+		if (len < IKED_COOKIE2_MIN || len > IKED_COOKIE2_MAX) {
+			log_debug("%s: ignoring malformed cookie2"
+			    " notification: %zu", __func__, len);
+			return (0);
+		}
+		ibuf_release(msg->msg_cookie2);	/* should not happen */
+		if ((msg->msg_cookie2 = ibuf_new(buf, len)) == NULL) {
+			log_debug("%s: failed to get peer cookie2", __func__);
+			return (-1);
+		}
+		msg->msg_parent->msg_cookie2 = msg->msg_cookie2;
+		break;
+	case IKEV2_N_COOKIE:
+		if (msg->msg_e) {
+			log_debug("%s: N_COOKIE encrypted",
+			    __func__);
+			return (-1);
+		}
+		if (len < IKED_COOKIE_MIN || len > IKED_COOKIE_MAX) {
+			log_debug("%s: ignoring malformed cookie"
+			    " notification: %zu", __func__, len);
+			return (0);
+		}
+		log_debug("%s: received cookie, len %zu", __func__, len);
+		print_hex(buf, 0, len);
+
+		ibuf_release(msg->msg_cookie);
+		if ((msg->msg_cookie = ibuf_new(buf, len)) == NULL) {
+			log_debug("%s: failed to get peer cookie", __func__);
+			return (-1);
+		}
+		msg->msg_parent->msg_cookie = msg->msg_cookie;
+		break;
+	case IKEV2_N_FRAGMENTATION_SUPPORTED:
+		if (msg->msg_e) {
+			log_debug("%s: N_FRAGMENTATION_SUPPORTED encrypted",
+			    __func__);
+			return (-1);
+		}
+		if (len != 0) {
+			log_debug("%s: ignoring malformed fragmentation"
+			    " notification: %zu", __func__, len);
+			return (0);
+		}
+		msg->msg_parent->msg_flags |= IKED_MSG_FLAGS_FRAGMENTATION;
 		break;
 	case IKEV2_N_SIGNATURE_HASH_ALGORITHMS:
 		if (msg->msg_e) {
@@ -1286,7 +1274,8 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 			len -= sizeof(signature_hash);
 			buf += sizeof(signature_hash);
 			if (signature_hash == IKEV2_SIGHASH_SHA2_256)
-				msg->msg_sa->sa_sigsha2 = 1;
+				msg->msg_parent->msg_flags
+				    |= IKED_MSG_FLAGS_SIGSHA2;
 		}
 		break;
 	}
@@ -1296,20 +1285,10 @@ ikev2_pld_notify(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_delete(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_delete *del)
+    struct ikev2_delete *del)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*del)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*del));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*del)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*del));
@@ -1340,7 +1319,7 @@ ikev2_pld_delete(struct iked *env, struct ikev2_payload *pld,
 	    msg->msg_parent->msg_response)
 		return (0);
 
-	if (ikev2_validate_delete(msg, offset, left, pld, &del))
+	if (ikev2_validate_delete(msg, offset, left, &del))
 		return (-1);
 	cnt = betoh16(del.del_nspi);
 	sz = del.del_spisize;
@@ -1350,7 +1329,7 @@ ikev2_pld_delete(struct iked *env, struct ikev2_payload *pld,
 	    sz, cnt);
 
 	buf = msgbuf + offset + sizeof(del);
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(del);
+	len = left - sizeof(del);
 
 	print_hex(buf, 0, len);
 
@@ -1372,7 +1351,7 @@ ikev2_pld_delete(struct iked *env, struct ikev2_payload *pld,
 			    IKEV2_EXCHANGE_INFORMATIONAL, 1);
 			msg->msg_parent->msg_responded = 1;
 			ibuf_release(resp);
-			sa_state(env, sa, IKEV2_STATE_CLOSED);
+			ikev2_ikesa_recv_delete(env, sa);
 		} else {
 			/*
 			 * We're sending a delete message. Upper layer
@@ -1455,6 +1434,8 @@ ikev2_pld_delete(struct iked *env, struct ikev2_payload *pld,
 		localdel->del_nspi = htobe16(found);
 
 		for (i = 0; i < cnt; i++) {
+			if (localspi[i] == 0)	/* happens if found < cnt */
+				continue;
 			switch (sz) {
 			case 4:
 				spi32 = htobe32(localspi[i]);
@@ -1469,7 +1450,7 @@ ikev2_pld_delete(struct iked *env, struct ikev2_payload *pld,
 			}
 		}
 
-		log_warnx("%s: deleted %zu spis", __func__, found);
+		log_warnx("%s: deleted %zu spis", SPI_SA(sa, __func__), found);
 	}
 
 	if (found) {
@@ -1482,30 +1463,18 @@ ikev2_pld_delete(struct iked *env, struct ikev2_payload *pld,
 	}
 
  done:
-	if (localspi)
-		free(localspi);
-	if (peersas)
-		free(peersas);
+	free(localspi);
+	free(peersas);
 	ibuf_release(resp);
 	return (ret);
 }
 
 int
 ikev2_validate_ts(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_tsp *tsp)
+    struct ikev2_tsp *tsp)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*tsp)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*tsp));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*tsp)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*tsp));
@@ -1526,19 +1495,34 @@ ikev2_pld_ts(struct iked *env, struct ikev2_payload *pld,
 	struct sockaddr_in		 s4;
 	struct sockaddr_in6		 s6;
 	uint8_t				 buf[2][128];
-	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
+	uint8_t				*ptr;
 
-	if (ikev2_validate_ts(msg, offset, left, pld, &tsp))
+	if (ikev2_validate_ts(msg, offset, left, &tsp))
 		return (-1);
-	offset += sizeof(tsp);
 
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(tsp);
+	ptr = ibuf_data(msg->msg_data) + offset;
+	len = left;
+
+	ptr += sizeof(tsp);
+	len -= sizeof(tsp);
 
 	log_debug("%s: count %d length %zu", __func__,
 	    tsp.tsp_count, len);
 
 	for (i = 0; i < tsp.tsp_count; i++) {
-		memcpy(&ts, msgbuf + offset, sizeof(ts));
+		if (len < sizeof(ts)) {
+			log_debug("%s: malformed payload: too short for ts "
+			    "(%zu < %zu)", __func__, left, sizeof(ts));
+			return (-1);
+		}
+		memcpy(&ts, ptr, sizeof(ts));
+		/* Note that ts_length includes header sizeof(ts) */
+		if (len < betoh16(ts.ts_length)) {
+			log_debug("%s: malformed payload: too short for "
+			    "ts_length (%zu < %u)", __func__, len,
+			    betoh16(ts.ts_length));
+			return (-1);
+		}
 
 		log_debug("%s: type %s protoid %u length %d "
 		    "startport %u endport %u", __func__,
@@ -1549,30 +1533,38 @@ ikev2_pld_ts(struct iked *env, struct ikev2_payload *pld,
 
 		switch (ts.ts_type) {
 		case IKEV2_TS_IPV4_ADDR_RANGE:
+			if (betoh16(ts.ts_length) < sizeof(ts) + 2 * 4) {
+				log_debug("%s: malformed payload: too short "
+				    "for ipv4 addr range (%u < %u)",
+				    __func__, betoh16(ts.ts_length), 2 * 4);
+				return (-1);
+			}
 			bzero(&s4, sizeof(s4));
 			s4.sin_family = AF_INET;
 			s4.sin_len = sizeof(s4);
-			memcpy(&s4.sin_addr.s_addr,
-			    msgbuf + offset + sizeof(ts), 4);
+			memcpy(&s4.sin_addr.s_addr, ptr + sizeof(ts), 4);
 			print_host((struct sockaddr *)&s4,
 			    (char *)buf[0], sizeof(buf[0]));
-			memcpy(&s4.sin_addr.s_addr,
-			    msgbuf + offset + sizeof(ts) + 4, 4);
+			memcpy(&s4.sin_addr.s_addr, ptr + sizeof(ts) + 4, 4);
 			print_host((struct sockaddr *)&s4,
 			    (char *)buf[1], sizeof(buf[1]));
 			log_debug("%s: start %s end %s", __func__,
 			    buf[0], buf[1]);
 			break;
 		case IKEV2_TS_IPV6_ADDR_RANGE:
+			if (betoh16(ts.ts_length) < sizeof(ts) + 2 * 16) {
+				log_debug("%s: malformed payload: too short "
+				    "for ipv6 addr range (%u < %u)",
+				    __func__, betoh16(ts.ts_length), 2 * 16);
+				return (-1);
+			}
 			bzero(&s6, sizeof(s6));
 			s6.sin6_family = AF_INET6;
 			s6.sin6_len = sizeof(s6);
-			memcpy(&s6.sin6_addr,
-			    msgbuf + offset + sizeof(ts), 16);
+			memcpy(&s6.sin6_addr, ptr + sizeof(ts), 16);
 			print_host((struct sockaddr *)&s6,
 			    (char *)buf[0], sizeof(buf[0]));
-			memcpy(&s6.sin6_addr,
-			    msgbuf + offset + sizeof(ts) + 16, 16);
+			memcpy(&s6.sin6_addr, ptr + sizeof(ts) + 16, 16);
 			print_host((struct sockaddr *)&s6,
 			    (char *)buf[1], sizeof(buf[1]));
 			log_debug("%s: start %s end %s", __func__,
@@ -1582,15 +1574,174 @@ ikev2_pld_ts(struct iked *env, struct ikev2_payload *pld,
 			break;
 		}
 
-		offset += betoh16(ts.ts_length);
+		ptr += betoh16(ts.ts_length);
+		len -= betoh16(ts.ts_length);
 	}
 
 	return (0);
 }
 
 int
+ikev2_pld_ef(struct iked *env, struct ikev2_payload *pld,
+    struct iked_message *msg, size_t offset, size_t left)
+{
+	struct iked_sa			*sa = msg->msg_sa;
+	struct iked_frag		*sa_frag = &sa->sa_fragments;
+	struct iked_frag_entry		*el;
+	struct ikev2_frag_payload	 frag;
+	uint8_t				*msgbuf = ibuf_data(msg->msg_data);
+	uint8_t				*buf;
+	struct ibuf			*e = NULL;
+	size_t				 frag_num, frag_total;
+	size_t			 	 len;
+	int				 ret = -1;
+	ssize_t				 elen;
+
+	buf = msgbuf + offset;
+	memcpy(&frag, buf, sizeof(frag));
+	frag_num = betoh16(frag.frag_num);
+	frag_total = betoh16(frag.frag_total);
+
+	offset += sizeof(frag);
+	buf = msgbuf + offset;
+	len = left - sizeof(frag);
+
+	/* Limit number of total fragments to avoid DOS */
+	if (frag_total > IKED_FRAG_TOTAL_MAX ) {
+		log_debug("%s: Total Fragments too big  %zu",
+		    __func__, frag_total);
+		goto dropall;
+	}
+
+	/* Check sanity of fragment header */
+	if (frag_num == 0 || frag_total == 0) {
+		log_debug("%s: Malformed fragment received: %zu of %zu",
+		    __func__, frag_num, frag_total);
+		goto done;
+	}
+	log_debug("%s: Received fragment: %zu of %zu",
+	     __func__, frag_num, frag_total);
+
+	/* Check new fragmented message */
+	if (sa_frag->frag_arr == NULL) {
+		sa_frag->frag_arr = recallocarray(NULL, 0, frag_total,
+		    sizeof(struct iked_frag_entry*));
+		sa_frag->frag_total = frag_total;
+		sa_frag->frag_nextpayload = pld->pld_nextpayload;
+	}
+
+	/* Drop all fragments if frag_num or frag_total don't match */
+	if (frag_num > sa_frag->frag_total || frag_total != sa_frag->frag_total)
+		goto dropall;
+
+	/* Silent drop if fragment already stored */
+	if (sa_frag->frag_arr[frag_num-1] != NULL)
+		goto done;
+
+        /* Decrypt fragment */
+	if ((e = ibuf_new(buf, len)) == NULL)
+		goto done;
+
+	if ((e = ikev2_msg_decrypt(env, msg->msg_sa, msg->msg_data, e))
+	    == NULL ) {
+		log_debug("%s: Failed to decrypt fragment: %zu of %zu",
+		    __func__, frag_num, frag_total);
+		goto done;
+	}
+	elen = ibuf_length(e);
+
+	/* Insert new list element */
+	el = calloc(1, sizeof(struct iked_frag_entry));
+	if (el == NULL) {
+		log_debug("%s: Failed allocating new fragment: %zu of %zu",
+		    __func__, frag_num, frag_total);
+		goto done;
+	}
+
+	sa_frag->frag_arr[frag_num-1] = el;
+	el->frag_size = elen;
+	el->frag_data = calloc(1, elen);
+	if (el->frag_data == NULL) {
+		log_debug("%s: Failed allocating new fragment data: %zu of %zu",
+		    __func__, frag_num, frag_total);
+		goto done;
+	}
+
+	/* Copy plaintext to fragment */
+	memcpy(el->frag_data, ibuf_seek(e, 0, 0), elen);
+	sa_frag->frag_total_size += elen;
+	sa_frag->frag_count++;
+
+	/* If all frags are received start reassembly */
+	if (sa_frag->frag_count == sa_frag->frag_total) {
+		log_debug("%s: All fragments received: %zu of %zu",
+		    __func__, frag_num, frag_total);
+		ret = ikev2_frags_reassemble(env, pld, msg);
+	} else {
+		ret = 0;
+	}
+done:
+	ibuf_release(e);
+	return (ret);
+dropall:
+	config_free_fragments(sa_frag);
+	ibuf_release(e);
+	return -1;
+}
+
+int
+ikev2_frags_reassemble(struct iked *env, struct ikev2_payload *pld,
+    struct iked_message *msg)
+{
+	struct iked_frag		*sa_frag = &msg->msg_sa->sa_fragments;
+	struct ibuf			*e = NULL;
+	struct iked_frag_entry		*el;
+	size_t				 offset;
+	size_t				 i;
+	struct iked_message		 emsg;
+	int				 ret = -1;
+
+	/* Reassemble fragments to single buffer */
+	if ((e = ibuf_new(NULL, sa_frag->frag_total_size)) == NULL) {
+		log_debug("%s: Failed allocating SK buffer.", __func__);
+		goto done;
+	}
+
+	/* Empty queue to new buffer */
+	offset = 0;
+	for (i = 0; i < sa_frag->frag_total; i++) {
+		if ((el = sa_frag->frag_arr[i]) == NULL)
+			fatalx("Tried to reassemble shallow frag_arr");
+		memcpy(ibuf_seek(e, offset, 0), el->frag_data, el->frag_size);
+		offset += el->frag_size;
+	}
+
+	log_debug("%s: Defragmented length %zd", __func__,
+	    sa_frag->frag_total_size);
+	print_hex(ibuf_data(e), 0,  sa_frag->frag_total_size);
+
+	/*
+	 * Parse decrypted payload
+	 */
+	bzero(&emsg, sizeof(emsg));
+	memcpy(&emsg, msg, sizeof(*msg));
+	emsg.msg_data = e;
+	emsg.msg_e = 1;
+	emsg.msg_parent = msg;
+	TAILQ_INIT(&emsg.msg_proposals);
+
+	ret = ikev2_pld_payloads(env, &emsg, 0, ibuf_size(e),
+	    sa_frag->frag_nextpayload);
+done:
+	config_free_fragments(sa_frag);
+	ibuf_release(e);
+
+	return (ret);
+}
+
+int
 ikev2_pld_e(struct iked *env, struct ikev2_payload *pld,
-    struct iked_message *msg, size_t offset)
+    struct iked_message *msg, size_t offset, size_t left)
 {
 	struct iked_sa		*sa = msg->msg_sa;
 	struct ibuf		*e = NULL;
@@ -1600,8 +1751,15 @@ ikev2_pld_e(struct iked *env, struct ikev2_payload *pld,
 	size_t			 len;
 	int			 ret = -1;
 
+	if (sa->sa_fragments.frag_arr != NULL) {
+		log_warn("%s: Received SK payload when SKFs are in queue.",
+		    __func__);
+		config_free_fragments(&sa->sa_fragments);
+		return (ret);
+	}
+
 	buf = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld);
+	len = left;
 
 	if ((e = ibuf_new(buf, len)) == NULL)
 		goto done;
@@ -1638,20 +1796,10 @@ ikev2_pld_e(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_cp(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct ikev2_cp *cp)
+    struct ikev2_cp *cp)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*cp)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*cp));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*cp)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*cp));
@@ -1668,31 +1816,45 @@ ikev2_pld_cp(struct iked *env, struct ikev2_payload *pld,
 {
 	struct ikev2_cp		 cp;
 	struct ikev2_cfg	*cfg;
-	uint8_t			*buf;
-	size_t			 len, i;
-	uint8_t			*msgbuf = ibuf_data(msg->msg_data);
+	uint8_t			*ptr;
+	size_t			 len;
 	struct iked_sa		*sa = msg->msg_sa;
 
-	if (ikev2_validate_cp(msg, offset, left, pld, &cp))
+	if (ikev2_validate_cp(msg, offset, left, &cp))
 		return (-1);
-	offset += sizeof(cp);
 
-	buf = msgbuf + offset;
-	len = betoh16(pld->pld_length) - sizeof(*pld) - sizeof(cp);
+	ptr = ibuf_data(msg->msg_data) + offset + sizeof(cp);
+	len = left - sizeof(cp);
 
 	log_debug("%s: type %s length %zu",
 	    __func__, print_map(cp.cp_type, ikev2_cp_map), len);
-	print_hex(buf, 0, len);
+	print_hex(ptr, 0, len);
 
-	for (i = 0; i < len;) {
-		cfg = (struct ikev2_cfg *)(buf + i);
+	while (len > 0) {
+		if (len < sizeof(*cfg)) {
+			log_debug("%s: malformed payload: too short for cfg "
+			    "(%zu < %zu)", __func__, len, sizeof(*cfg));
+			return (-1);
+		}
+		cfg = (struct ikev2_cfg *)ptr;
 
 		log_debug("%s: %s 0x%04x length %d", __func__,
 		    print_map(betoh16(cfg->cfg_type), ikev2_cfg_map),
 		    betoh16(cfg->cfg_type),
 		    betoh16(cfg->cfg_length));
 
-		i += betoh16(cfg->cfg_length) + sizeof(*cfg);
+		ptr += sizeof(*cfg);
+		len -= sizeof(*cfg);
+
+		if (len < betoh16(cfg->cfg_length)) {
+			log_debug("%s: malformed payload: too short for "
+			    "cfg_length (%zu < %u)", __func__, len,
+			    betoh16(cfg->cfg_length));
+			return (-1);
+		}
+
+		ptr += betoh16(cfg->cfg_length);
+		len -= betoh16(cfg->cfg_length);
 	}
 
 	if (!ikev2_msg_frompeer(msg))
@@ -1706,20 +1868,10 @@ ikev2_pld_cp(struct iked *env, struct ikev2_payload *pld,
 
 int
 ikev2_validate_eap(struct iked_message *msg, size_t offset, size_t left,
-    struct ikev2_payload *pld, struct eap_header *hdr)
+    struct eap_header *hdr)
 {
 	uint8_t		*msgbuf = ibuf_data(msg->msg_data);
-	size_t		 pld_length;
 
-	pld_length = betoh16(pld->pld_length);
-	if (pld_length < sizeof(*pld) + sizeof(*hdr)) {
-		log_debug("%s: malformed payload: specified length smaller "
-		    "than minimum size (%zu < %zu)", __func__, pld_length,
-		    sizeof(*pld) + sizeof(*hdr));
-		return (-1);
-	}
-
-	/* This will actually be caught by earlier checks. */
 	if (left < sizeof(*hdr)) {
 		log_debug("%s: malformed payload: too short for header "
 		    "(%zu < %zu)", __func__, left, sizeof(*hdr));
@@ -1739,7 +1891,7 @@ ikev2_pld_eap(struct iked *env, struct ikev2_payload *pld,
 	struct iked_sa			*sa = msg->msg_sa;
 	size_t				 len;
 
-	if (ikev2_validate_eap(msg, offset, left, pld, &hdr))
+	if (ikev2_validate_eap(msg, offset, left, &hdr))
 		return (-1);
 	len = betoh16(hdr.eap_length);
 
