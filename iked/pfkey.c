@@ -866,13 +866,13 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		sa_enckey.sadb_key_bits =
 		    8 * ibuf_size(sa->csa_encrkey);
 	}
-
+#if 0
 	/* local id */
 	sa_srcid = pfkey_id2ident(sa->csa_srcid, SADB_EXT_IDENTITY_SRC);
 
 	/* peer id */
 	sa_dstid = pfkey_id2ident(sa->csa_dstid, SADB_EXT_IDENTITY_DST);
-
+#endif
 #if defined(_OPENBSD_IPSEC_API_VERSION)
 	tag = sa->csa_ikesa->sa_tag;
 	if (tag != NULL && *tag != '\0') {
@@ -1002,15 +1002,15 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		smsg.sadb_msg_len += sa_authkey.sadb_key_len;
 		iov_cnt++;
 	}
-
-	if (0 && sa_srcid) {
+#if 0
+	if (sa_srcid) {
 		/* src identity */
 		iov[iov_cnt].iov_base = sa_srcid;
 		iov[iov_cnt].iov_len = sa_srcid->sadb_ident_len * 8;
 		smsg.sadb_msg_len += sa_srcid->sadb_ident_len;
 		iov_cnt++;
 	}
-	if (0 && sa_dstid) {
+	if (sa_dstid) {
 		/* dst identity */
 		iov[iov_cnt].iov_base = sa_dstid;
 		iov[iov_cnt].iov_len = sa_dstid->sadb_ident_len * 8;
@@ -1018,6 +1018,24 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		iov_cnt++;
 	}
 
+	if (action == SADB_UPDATE) {
+		if (sa_srcid) {
+			/* src identity */
+			iov[iov_cnt].iov_base = sa_srcid;
+			iov[iov_cnt].iov_len = sa_srcid->sadb_ident_len * 8;
+			smsg.sadb_msg_len += sa_srcid->sadb_ident_len;
+			iov_cnt++;
+		}
+	} else {
+		if (sa_dstid) {
+			/* src identity */
+			iov[iov_cnt].iov_base = sa_dstid;
+			iov[iov_cnt].iov_len = sa_dstid->sadb_ident_len * 8;
+			smsg.sadb_msg_len += sa_dstid->sadb_ident_len;
+			iov_cnt++;
+		}
+	}
+#endif
 #if defined(_OPENBSD_IPSEC_API_VERSION)
 	if (tag != NULL) {
 		/* tag identity */
