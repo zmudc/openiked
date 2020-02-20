@@ -6,6 +6,7 @@ PROG=		ikectl
 SRCS=		log.c ikeca.c ikectl.c parser.c util.c
 
 MAN=		ikectl.8
+BINDIR=		/usr/sbin
 
 LDADD=		-lutil -lcrypto
 DPADD=		${LIBUTIL} ${LIBCRYPTO}

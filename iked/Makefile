@@ -8,6 +8,7 @@ SRCS=		ca.c chap_ms.c config.c control.c crypto.c dh.c \
 SRCS+=		eap_map.c ikev2_map.c
 SRCS+=		parse.y
 MAN=		iked.conf.5 iked.8
+BINDIR=		/usr/sbin
 #NOMAN=		yes
 
 LDADD=		-lutil -levent -lcrypto
