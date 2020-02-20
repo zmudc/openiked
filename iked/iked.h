@@ -158,6 +158,7 @@ struct iked_flow {
 	uint8_t				 flow_saproto;
 	uint8_t				 flow_ipproto;
 	uint8_t				 flow_type;
+	u_int32_t			 flow_id;
 
 	struct iked_addr		*flow_local;	/* outer source */
 	struct iked_addr		*flow_peer;	/* outer dest */

@@ -24,7 +24,9 @@
 #include <sys/socket.h>
 
 #include <netinet/in.h>
+#if defined(__OpenBSD__)
 #include <netinet/ip_ipsp.h>
+#endif
 #include <net/pfkeyv2.h>
 
 #include <err.h>
@@ -102,8 +104,10 @@ int	pfkey_map(const struct pfkey_constmap *, uint16_t, uint8_t *);
 int	pfkey_flow(int, uint8_t, uint8_t, struct iked_flow *);
 int	pfkey_sa(int, uint8_t, uint8_t, struct iked_childsa *);
 int	pfkey_sa_getspi(int, uint8_t, struct iked_childsa *, uint32_t *);
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 int	pfkey_sagroup(int, uint8_t, uint8_t,
 	    struct iked_childsa *, struct iked_childsa *);
+#endif
 int	pfkey_write(int, struct sadb_msg *, struct iovec *, int,
 	    uint8_t **, ssize_t *);
 int	pfkey_reply(int, uint8_t **, ssize_t *);
@@ -179,6 +183,7 @@ pfkey_map(const struct pfkey_constmap *map, uint16_t alg, uint8_t *pfkalg)
 int
 pfkey_flow(int sd, uint8_t satype, uint8_t action, struct iked_flow *flow)
 {
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	struct sadb_msg		 smsg;
 	struct iked_addr	*flow_src, *flow_dst;
 	struct sadb_address	 sa_src, sa_dst, sa_local, sa_peer, sa_smask,
@@ -432,6 +437,204 @@ pfkey_flow(int sd, uint8_t satype, uint8_t action, struct iked_flow *flow)
 	free(sa_srcid);
 	free(sa_dstid);
 
+#else /* !_OPENBSD_IPSEC_API_VERSION */
+
+	struct sadb_msg		 smsg;
+	struct sadb_address	 sa_src, sa_dst;
+	struct sadb_x_ipsecrequest sa_ipsec;
+	struct sadb_x_policy	 sa_policy, *sa_polid;
+	struct sadb_x_sa2	 sa_2;
+	struct sockaddr_storage	 ssrc, sdst, slocal, speer;
+	struct iovec		 iov[IOV_CNT];
+	int			 iov_cnt, ret = -1;
+	in_port_t		 sport, dport;
+	u_int8_t		 smask, dmask;
+	u_int8_t		 zeropad[8];
+	size_t			 padlen;
+	u_int8_t		*reply = NULL;
+	ssize_t			 rlen;
+
+	bzero(&ssrc, sizeof(ssrc));
+	memcpy(&ssrc, &flow->flow_src.addr, sizeof(ssrc));
+	sport = flow->flow_src.addr_port;
+	socket_af((struct sockaddr *)&ssrc, sport);
+
+	switch (flow->flow_src.addr_af) {
+	case AF_INET:
+		smask = flow->flow_src.addr_net ?
+		    flow->flow_src.addr_mask : 32;
+		break;
+	case AF_INET6:
+		smask = flow->flow_src.addr_net ?
+		    flow->flow_src.addr_mask : 128;
+		break;
+	default:
+		log_warnx("%s: unsupported address family %d",
+		    __func__, flow->flow_src.addr_af);
+		return (-1);
+	}
+
+	bzero(&sdst, sizeof(sdst));
+	memcpy(&sdst, &flow->flow_dst.addr, sizeof(sdst));
+	dport = flow->flow_dst.addr_port;
+	socket_af((struct sockaddr *)&sdst, dport);
+
+	switch (flow->flow_dst.addr_af) {
+	case AF_INET:
+		dmask = flow->flow_dst.addr_net ?
+		    flow->flow_dst.addr_mask : 32;
+		break;
+	case AF_INET6:
+		dmask = flow->flow_dst.addr_net ?
+		    flow->flow_dst.addr_mask : 128;
+		break;
+	default:
+		log_warnx("%s: unsupported address family %d",
+		    __func__, flow->flow_dst.addr_af);
+		return (-1);
+	}
+
+	bzero(&slocal, sizeof(slocal));
+	bzero(&speer, sizeof(speer));
+	bzero(&zeropad, sizeof(zeropad));
+	if (flow->flow_local == NULL) {
+		slocal.ss_family = flow->flow_src.addr_af;
+		speer.ss_family = flow->flow_dst.addr_af;
+	} else if (flow->flow_dir == IPSEC_DIR_INBOUND) {
+		memcpy(&speer, &flow->flow_local->addr, sizeof(slocal));
+		memcpy(&slocal, &flow->flow_peer->addr, sizeof(speer));
+	} else {
+		memcpy(&slocal, &flow->flow_local->addr, sizeof(slocal));
+		memcpy(&speer, &flow->flow_peer->addr, sizeof(speer));
+	}
+	socket_af((struct sockaddr *)&slocal, 0);
+	socket_af((struct sockaddr *)&speer, 0);
+
+	bzero(&smsg, sizeof(smsg));
+	smsg.sadb_msg_version = PF_KEY_V2;
+	smsg.sadb_msg_seq = ++sadb_msg_seq;
+	smsg.sadb_msg_pid = getpid();
+	smsg.sadb_msg_len = sizeof(smsg) / 8;
+	smsg.sadb_msg_type = action;
+	smsg.sadb_msg_satype = SADB_SATYPE_UNSPEC;
+
+	bzero(&sa_2, sizeof(sa_2));
+	sa_2.sadb_x_sa2_exttype = SADB_X_EXT_SA2;
+	sa_2.sadb_x_sa2_len = sizeof(sa_2) / 8;
+	sa_2.sadb_x_sa2_mode = IPSEC_MODE_TUNNEL;
+
+	bzero(&sa_src, sizeof(sa_src));
+	sa_src.sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
+	sa_src.sadb_address_proto = IPSEC_ULPROTO_ANY; //flow->flow_ipproto
+	sa_src.sadb_address_prefixlen = smask;
+	sa_src.sadb_address_len = ROUNDUP(sizeof(sa_src) + SS_LEN(&ssrc)) / 8;
+
+	bzero(&sa_dst, sizeof(sa_dst));
+	sa_dst.sadb_address_exttype = SADB_EXT_ADDRESS_DST;
+	sa_dst.sadb_address_proto = IPSEC_ULPROTO_ANY; //flow->flow_ipproto;
+	sa_dst.sadb_address_prefixlen = dmask;
+	sa_dst.sadb_address_len = ROUNDUP(sizeof(sa_dst) + SS_LEN(&sdst)) / 8;
+
+	bzero(&sa_policy, sizeof(sa_policy));
+	sa_policy.sadb_x_policy_exttype = SADB_X_EXT_POLICY;
+	sa_policy.sadb_x_policy_dir = flow->flow_dir;
+
+	switch (flow->flow_type) {
+	case SADB_X_FLOW_TYPE_DENY:
+		sa_policy.sadb_x_policy_type = IPSEC_POLICY_DISCARD;
+		sa_policy.sadb_x_policy_len = sizeof(sa_policy) / 8;
+		break;
+	default:
+		sa_policy.sadb_x_policy_type = IPSEC_POLICY_IPSEC;
+		bzero(&sa_ipsec, sizeof(sa_ipsec));
+		sa_ipsec.sadb_x_ipsecrequest_proto =
+		    satype == SADB_SATYPE_AH ? IPPROTO_AH : IPPROTO_ESP;
+		sa_ipsec.sadb_x_ipsecrequest_mode = IPSEC_MODE_TUNNEL; /* XXX */
+		sa_ipsec.sadb_x_ipsecrequest_level = IPSEC_LEVEL_REQUIRE;
+		sa_ipsec.sadb_x_ipsecrequest_len = sizeof(sa_ipsec) +
+		    SS_LEN(&slocal) + SS_LEN(&speer);
+		padlen = ROUNDUP(sa_ipsec.sadb_x_ipsecrequest_len) -
+		    sa_ipsec.sadb_x_ipsecrequest_len;
+		sa_ipsec.sadb_x_ipsecrequest_len += padlen;
+		sa_policy.sadb_x_policy_len =
+		    (sizeof(sa_policy) +
+		    sa_ipsec.sadb_x_ipsecrequest_len) / 8;
+		break;
+	}
+
+	iov_cnt = 0;
+
+	/* header */
+	iov[iov_cnt].iov_base = &smsg;
+	iov[iov_cnt].iov_len = sizeof(smsg);
+	iov_cnt++;
+
+	/* add flow SA2 */
+	iov[iov_cnt].iov_base = &sa_2;
+	iov[iov_cnt].iov_len = sizeof(sa_2);
+	smsg.sadb_msg_len += sa_2.sadb_x_sa2_len;
+	iov_cnt++;
+
+	/* add source address */
+	iov[iov_cnt].iov_base = &sa_src;
+	iov[iov_cnt].iov_len = sizeof(sa_src);
+	iov_cnt++;
+	iov[iov_cnt].iov_base = &ssrc;
+	iov[iov_cnt].iov_len = SS_LEN(&ssrc);
+	smsg.sadb_msg_len += sa_src.sadb_address_len;
+	iov_cnt++;
+
+	/* add destination address */
+	iov[iov_cnt].iov_base = &sa_dst;
+	iov[iov_cnt].iov_len = sizeof(sa_dst);
+	iov_cnt++;
+	iov[iov_cnt].iov_base = &sdst;
+	iov[iov_cnt].iov_len = SS_LEN(&sdst);
+	smsg.sadb_msg_len += sa_dst.sadb_address_len;
+	iov_cnt++;
+
+	/* add policy extension */
+	iov[iov_cnt].iov_base = &sa_policy;
+	iov[iov_cnt].iov_len = sizeof(sa_policy);
+	smsg.sadb_msg_len += sa_policy.sadb_x_policy_len;
+	iov_cnt++;
+
+	if (sa_policy.sadb_x_policy_type == IPSEC_POLICY_IPSEC) {
+		iov[iov_cnt].iov_base = &sa_ipsec;
+		iov[iov_cnt].iov_len = sizeof(sa_ipsec);
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &slocal;
+		iov[iov_cnt].iov_len = SS_LEN(&slocal);
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &speer;
+		iov[iov_cnt].iov_len = SS_LEN(&speer);
+		if (padlen) {
+			iov_cnt++;
+			iov[iov_cnt].iov_base = zeropad;
+			iov[iov_cnt].iov_len = padlen;
+		}
+		iov_cnt++;
+	}
+
+	ret = -1;
+	if (pfkey_write(sd, &smsg, iov, iov_cnt, &reply, &rlen) != 0)
+		goto done;
+
+	if ((sa_polid = pfkey_find_ext(reply, rlen,
+	    SADB_X_EXT_POLICY)) == NULL) {
+		log_debug("%s: erronous reply", __func__);
+		goto done;
+	}
+	flow->flow_id = sa_polid->sadb_x_policy_id;
+
+	log_debug("%s: flow with policy id 0x%x", __func__, flow->flow_id);
+	ret = 0;
+
+ done:
+	free(reply);
+
+#endif /* !_OPENBSD_IPSEC_API_VERSION */
+
 	return (ret);
 }
 
@@ -443,10 +646,21 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 	struct sadb_address	 sa_src, sa_dst, sa_pxy;
 	struct sadb_key		 sa_authkey, sa_enckey;
 	struct sadb_lifetime	 sa_ltime_hard, sa_ltime_soft;
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	struct sadb_x_udpencap	 udpencap;
 	struct sadb_x_tag	 sa_tag;
 	char			*tag = NULL;
 	struct sadb_x_tap	 sa_tap;
+	int			 dotap = 0;
+#else
+	struct sadb_x_sa2	 sa_2;
+#if defined(HAVE_APPLE_NATT)
+	struct sadb_sa_natt	 natt;
+#else
+	struct sadb_x_nat_t_type nat_type;
+	struct sadb_x_nat_t_port nat_sport, nat_dport;
+#endif /* HAVE_APPLE_NATT */
+#endif /* _OPENBSD_IPSEC_API_VERSION */
 	struct sockaddr_storage	 ssrc, sdst, spxy;
 	struct sadb_ident	*sa_srcid, *sa_dstid;
 	struct iked_lifetime	*lt;
@@ -455,7 +669,7 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 	struct iovec		 iov[IOV_CNT];
 	uint32_t		 jitter;
 	int			 iov_cnt;
-	int			 ret, dotap = 0;
+	int			 ret = 0;
 
 	sa_srcid = sa_dstid = NULL;
 
@@ -508,11 +722,19 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 	sadb.sadb_sa_state = SADB_SASTATE_MATURE;
 	sadb.sadb_sa_replay = 64;
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	if (!sa->csa_transport)
 		sadb.sadb_sa_flags |= SADB_X_SAFLAGS_TUNNEL;
 
 	if (sa->csa_esn)
 		sadb.sadb_sa_flags |= SADB_X_SAFLAGS_ESN;
+#else
+	bzero(&sa_2, sizeof(sa_2));
+	sa_2.sadb_x_sa2_exttype = SADB_X_EXT_SA2;
+	sa_2.sadb_x_sa2_len = sizeof(sa_2) / 8;
+	sa_2.sadb_x_sa2_mode = (sa->csa_transport) ? IPSEC_MODE_TRANSPORT :
+	    IPSEC_MODE_TUNNEL;
+#endif
 
 	bzero(&sa_src, sizeof(sa_src));
 	sa_src.sadb_address_len = (sizeof(sa_src) + ROUNDUP(ssrc.ss_len)) / 8;
@@ -528,7 +750,13 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 
 	bzero(&sa_authkey, sizeof(sa_authkey));
 	bzero(&sa_enckey, sizeof(sa_enckey));
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	bzero(&udpencap, sizeof udpencap);
+#elif defined(HAVE_APPLE_NATT)
+	bzero(&natt, sizeof(natt));
+#else
+	bzero(&nat_type, sizeof(nat_type));
+#endif
 	bzero(&sa_ltime_hard, sizeof(sa_ltime_hard));
 	bzero(&sa_ltime_soft, sizeof(sa_ltime_soft));
 
@@ -537,14 +765,49 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 
 	if (satype == SADB_SATYPE_ESP &&
 	    sa->csa_ikesa->sa_udpencap && sa->csa_ikesa->sa_natt) {
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 		sadb.sadb_sa_flags |= SADB_X_SAFLAGS_UDPENCAP;
 		udpencap.sadb_x_udpencap_exttype = SADB_X_EXT_UDPENCAP;
 		udpencap.sadb_x_udpencap_len = sizeof(udpencap) / 8;
 		udpencap.sadb_x_udpencap_port =
 		    sa->csa_ikesa->sa_peer.addr_port;
-
 		log_debug("%s: udpencap port %d", __func__,
 		    ntohs(udpencap.sadb_x_udpencap_port));
+#elif defined(HAVE_APPLE_NATT)
+		sadb.sadb_sa_flags |= SADB_X_EXT_NATT;
+		/* XXX check NAT detection for local/peer hash instead */
+		if (sa->csa_dir == IPSP_DIRECTION_OUT)
+			sadb.sadb_sa_flags |= SADB_X_EXT_NATT_KEEPALIVE;
+		else
+			sadb.sadb_sa_flags |= SADB_X_EXT_NATT_DETECTED_PEER;
+		natt.sadb_sa_natt_port =
+		    ntohs(sa->csa_ikesa->sa_peer.addr_port);
+#else
+		nat_type.sadb_x_nat_t_type_len = sizeof(nat_type) / 8;
+		nat_type.sadb_x_nat_t_type_exttype = SADB_X_EXT_NAT_T_TYPE;
+		nat_type.sadb_x_nat_t_type_type = UDP_ENCAP_ESPINUDP;
+		bzero(&nat_sport, sizeof(nat_sport));
+		nat_sport.sadb_x_nat_t_port_len = sizeof(nat_sport) / 8;
+		nat_sport.sadb_x_nat_t_port_exttype = SADB_X_EXT_NAT_T_SPORT;
+		nat_sport.sadb_x_nat_t_port_port =
+		    sa->csa_ikesa->sa_local.addr_port;
+		bzero(&nat_dport, sizeof(nat_dport));
+		nat_dport.sadb_x_nat_t_port_len = sizeof(nat_dport) / 8;
+		nat_dport.sadb_x_nat_t_port_exttype = SADB_X_EXT_NAT_T_DPORT;
+		nat_dport.sadb_x_nat_t_port_port =
+		    sa->csa_ikesa->sa_peer.addr_port;
+
+		log_debug("%s: NAT-T: type=%s (%d) sport=%d dport=%d",
+			    __func__,
+			    (nat_type.sadb_x_nat_t_type_type ==
+						UDP_ENCAP_ESPINUDP)
+			    ? "UDP encap" : "unknown",
+			    nat_type.sadb_x_nat_t_type_type,
+			    ntohs(nat_sport.sadb_x_nat_t_port_port),
+			    ntohs(nat_dport.sadb_x_nat_t_port_port));
+#endif
+		log_debug("%s: udpencap port %u", __func__,
+		    ntohs(sa->csa_ikesa->sa_peer.addr_port));
 	}
 
 	if (action == IKED_SADB_UPDATE_SA_ADDRESSES) {
@@ -578,7 +841,11 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 	/* XXX handle NULL encryption or NULL auth or combined encr/auth */
 	if (action == SADB_ADD &&
 	    !ibuf_length(sa->csa_integrkey) && !ibuf_length(sa->csa_encrkey) &&
-	    satype != SADB_X_SATYPE_IPCOMP && satype != SADB_X_SATYPE_IPIP) {
+	    satype != SADB_X_SATYPE_IPCOMP
+#if defined(_OPENBSD_IPSEC_API_VERSION)
+	    && satype != SADB_X_SATYPE_IPIP
+#endif
+	    ) {
 		log_warnx("%s: no key specified", __func__);
 		return (-1);
 	}
@@ -622,6 +889,7 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		sadb.sadb_sa_encrypt = SADB_X_CALG_DEFLATE;
 
 	/* Note that we need to swap the IDs for incoming SAs (SADB_UPDATE) */
+#if 0
 	if (action != SADB_UPDATE) {
 		sa_srcid = pfkey_id2ident(
 		    IKESA_SRCID(sa->csa_ikesa), SADB_EXT_IDENTITY_SRC);
@@ -633,7 +901,9 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		sa_dstid = pfkey_id2ident(
 		    IKESA_SRCID(sa->csa_ikesa), SADB_EXT_IDENTITY_DST);
 	}
+#endif
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	tag = sa->csa_ikesa->sa_tag;
 	if (tag != NULL && *tag != '\0') {
 		bzero(&sa_tag, sizeof(sa_tag));
@@ -651,6 +921,7 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		sa_tap.sadb_x_tap_len = sizeof(sa_tap) / 8;
 		sa_tap.sadb_x_tap_unit = pol->pol_tap;
 	}
+#endif
 
  send:
 	iov_cnt = 0;
@@ -663,8 +934,24 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 	/* sa */
 	iov[iov_cnt].iov_base = &sadb;
 	iov[iov_cnt].iov_len = sizeof(sadb);
+#if defined(HAVE_APPLE_NATT)
+	if (natt.sadb_sa_natt_port) {
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &natt;
+		iov[iov_cnt].iov_len = sizeof(natt);
+		sadb.sadb_sa_len += sizeof(natt) / 8;
+	}
+#endif
 	smsg.sadb_msg_len += sadb.sadb_sa_len;
 	iov_cnt++;
+
+#if !defined(_OPENBSD_IPSEC_API_VERSION)
+	/* sa2 */
+	iov[iov_cnt].iov_base = &sa_2;
+	iov[iov_cnt].iov_len = sizeof(sa_2);
+	smsg.sadb_msg_len += sa_2.sadb_x_sa2_len;
+	iov_cnt++;
+#endif
 
 	/* src addr */
 	iov[iov_cnt].iov_base = &sa_src;
@@ -711,12 +998,29 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		iov_cnt++;
 	}
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	if (udpencap.sadb_x_udpencap_len) {
 		iov[iov_cnt].iov_base = &udpencap;
 		iov[iov_cnt].iov_len = sizeof(udpencap);
 		smsg.sadb_msg_len += udpencap.sadb_x_udpencap_len;
 		iov_cnt++;
 	}
+#elif !defined(HAVE_APPLE_NATT)
+	if (sa->csa_ikesa->sa_udpencap && sa->csa_ikesa->sa_natt) {
+		iov[iov_cnt].iov_base = &nat_type;
+		iov[iov_cnt].iov_len = sizeof(nat_type);
+		smsg.sadb_msg_len += nat_type.sadb_x_nat_t_type_len;
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &nat_sport;
+		iov[iov_cnt].iov_len = sizeof(nat_sport);
+		smsg.sadb_msg_len += nat_sport.sadb_x_nat_t_port_len;
+		iov_cnt++;
+		iov[iov_cnt].iov_base = &nat_dport;
+		iov[iov_cnt].iov_len = sizeof(nat_dport);
+		smsg.sadb_msg_len += nat_dport.sadb_x_nat_t_port_len;
+		iov_cnt++;
+	}
+#endif
 
 	if (sa_enckey.sadb_key_len) {
 		/* encryption key */
@@ -740,7 +1044,7 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		smsg.sadb_msg_len += sa_authkey.sadb_key_len;
 		iov_cnt++;
 	}
-
+#if 0
 	if (sa_srcid) {
 		/* src identity */
 		iov[iov_cnt].iov_base = sa_srcid;
@@ -755,7 +1059,8 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		smsg.sadb_msg_len += sa_dstid->sadb_ident_len;
 		iov_cnt++;
 	}
-
+#endif
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	if (tag != NULL) {
 		/* tag identity */
 		iov[iov_cnt].iov_base = &sa_tag;
@@ -774,6 +1079,7 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 		smsg.sadb_msg_len += sa_tap.sadb_x_tap_len;
 		iov_cnt++;
 	}
+#endif
 
 	ret = pfkey_write(sd, &smsg, iov, iov_cnt, NULL, NULL);
 
@@ -1001,6 +1307,7 @@ done:
 	return (ret);
 }
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 int
 pfkey_sagroup(int sd, uint8_t satype1, uint8_t action,
     struct iked_childsa *sa1, struct iked_childsa *sa2)
@@ -1113,6 +1420,7 @@ pfkey_sagroup(int sd, uint8_t satype1, uint8_t action,
 
 	return (pfkey_write(sd, &smsg, iov, iov_cnt, NULL, NULL));
 }
+#endif
 
 int
 pfkey_write(int sd, struct sadb_msg *smsg, struct iovec *iov, int iov_cnt,
@@ -1328,6 +1636,7 @@ pfkey_sa_add(int fd, struct iked_childsa *sa, struct iked_childsa *last)
 		}
 	}
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	if (last != NULL) {
 		if (pfkey_sagroup(fd, satype,
 		    SADB_X_GRPSPIS, sa, last) == -1) {
@@ -1335,6 +1644,7 @@ pfkey_sa_add(int fd, struct iked_childsa *sa, struct iked_childsa *last)
 			return (-1);
 		}
 	}
+#endif
 
 	sa->csa_loaded = 1;
 	return (0);
@@ -1614,6 +1924,7 @@ pfkey_process(struct iked *env, struct pfkey_message *pm)
 	struct sadb_sa		*sa;
 	struct sadb_lifetime	*sa_ltime;
 	struct sadb_msg		*hdr;
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	struct sadb_msg		 smsg;
 	struct iked_addr	 peer;
 	struct iked_flow	 flow;
@@ -1626,6 +1937,14 @@ pfkey_process(struct iked *env, struct pfkey_message *pm)
 	uint8_t			*reply;
 	ssize_t			 rlen;
 	const char		*errmsg = NULL;
+#else
+	struct iked_addr	 peer;
+	struct sadb_address	*sa_addr;
+	struct sockaddr		*speer;
+	struct sadb_x_policy	*sa_pol;
+	struct iked_flow	*flow;
+	int			 ret = 0;
+#endif
 	uint8_t			*data = pm->pm_data;
 	ssize_t			 len = pm->pm_length;
 	size_t			 slen;
@@ -1633,7 +1952,9 @@ pfkey_process(struct iked *env, struct pfkey_message *pm)
 	if (!env || !data || !len)
 		return (0);
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 	sd = env->sc_pfkey;
+#endif
 	hdr = (struct sadb_msg *)data;
 
 	switch (hdr->sadb_msg_type) {
@@ -1659,11 +1980,12 @@ pfkey_process(struct iked *env, struct pfkey_message *pm)
 			log_debug("%s: invalid address", __func__);
 			return (0);
 		}
-		flow.flow_peer = &peer;
+		flow->flow_peer = &peer;
 
 		log_debug("%s: acquire request (peer %s)", __func__,
 		    print_host(speer, NULL, 0));
 
+#if defined(_OPENBSD_IPSEC_API_VERSION)
 		/* get the matching flow */
 		bzero(&smsg, sizeof(smsg));
 		smsg.sadb_msg_version = PF_KEY_V2;
@@ -1800,6 +2122,33 @@ out:
 		if (errmsg)
 			log_warnx("%s: %s wasn't found", __func__, errmsg);
 		free(reply);
+#elif defined(SADB_X_EXT_POLICY)
+		if ((sa_pol = pfkey_find_ext(data, len,
+		    SADB_X_EXT_POLICY)) == NULL) {
+			log_debug("%s: no policy extension", __func__);
+			return (0);
+		}
+
+		RB_FOREACH(flow, iked_flows, &env->sc_activeflows) {
+			/*
+			 * Find existing active policy by policy Id.
+			 * XXX This should use another tree that uses
+			 * XXX the x_policy_id as lookup key.
+			 */
+			if (flow->flow_id == sa_pol->sadb_x_policy_id) {
+				log_debug("%s: flow %s policy id 0x%x ",
+				    __func__,
+				    flow->flow_dir == IPSP_DIRECTION_IN ?
+				    "in" : "out", flow->flow_id);
+				ikev2_acquire_sa(env, flow);
+				break;
+			}
+		}
+#else
+#warning PFKEYv2 SADB_ACQUIRE not implemented
+		log_debug("%s: SADB_ACQUIRE not yet supported here, ignored",
+		    __func__);
+#endif
 		break;
 
 	case SADB_EXPIRE:

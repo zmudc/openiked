@@ -18,6 +18,9 @@ clients using the EAP-MSCHAPv2 protocol over IKEv2.  It interconnects
 with other IKEv2 implementations like the native IKEv2 implementation
 of Windows 7 or newer (aka Agile VPN) or strongSwan.
 
+This version is for modifying the OpenBSD iked for use on NetBSD.
+It is a work in progress.
+
 The main development of iked is being done for OpenBSD and the source
 tree is found in OpenBSD's CVS repository.  Like most of the projects
 from the OpenBSD repository, the original source code does not include

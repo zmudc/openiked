@@ -24,7 +24,9 @@
 #include <sys/uio.h>
 
 #include <netinet/in.h>
+#if defined(__OpenBSD__)
 #include <netinet/ip_ipsp.h>
+#endif
 #include <arpa/inet.h>
 
 #include <stdlib.h>

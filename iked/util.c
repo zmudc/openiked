@@ -101,6 +101,7 @@ socket_getaddr(int s, struct sockaddr_storage *ss)
 int
 socket_bypass(int s, struct sockaddr *sa)
 {
+#if defined(__OpenBSD__)
 	int	 v, *a;
 	int	 a4[] = {
 		    IPPROTO_IP,
@@ -152,6 +153,47 @@ socket_bypass(int s, struct sockaddr *sa)
 		return (-1);
 	}
 #endif
+#else /* __OpenBSD__ */
+	int	*a;
+	int	 a4[] = {
+		    IPPROTO_IP,
+		    IP_IPSEC_POLICY
+	};
+	int	 a6[] = {
+		    IPPROTO_IPV6,
+		    IPV6_IPSEC_POLICY,
+
+	};
+	struct sadb_x_policy pol = {
+		    SADB_UPDATE,
+		    SADB_EXT_SENSITIVITY,
+		    IPSEC_POLICY_BYPASS,
+		    0, 0, 0, 0
+	};
+
+	switch (sa->sa_family) {
+	case AF_INET:
+		a = a4;
+		break;
+	case AF_INET6:
+		a = a6;
+		break;
+	default:
+		log_warn("%s: invalid address family", __func__);
+		return (-1);
+	}
+
+	pol.sadb_x_policy_dir = IPSEC_DIR_INBOUND;
+	if (setsockopt(s, a[0], a[1], &pol, sizeof(pol)) == -1) {
+		log_warn("%s: IPSEC_DIR_INBOUND", __func__);
+		return (-1);
+	}
+	pol.sadb_x_policy_dir = IPSEC_DIR_OUTBOUND;
+	if (setsockopt(s, a[0], a[1], &pol, sizeof(pol)) == -1) {
+		log_warn("%s: IPSEC_DIR_OUTBOUND", __func__);
+		return (-1);
+	}
+#endif /* !__OpenBSD__ */
 
 	return (0);
 }
@@ -207,6 +249,20 @@ udp_bind(struct sockaddr *sa, in_port_t port)
 			goto bad;
 		}
 	}
+
+#if 1 /* NetBSD specific? */
+	val = UDP_ENCAP_ESPINUDP;
+	if (sa->sa_family == AF_INET
+	    && port == ntohs(IKED_NATT_PORT)) {
+		log_info("%s: setting ESP in UDP socket",
+		    __func__);
+		if (setsockopt(s, IPPROTO_UDP, UDP_ENCAP,
+			       &val, sizeof(int)) < 0) {
+			log_warn("%s: failed to set ESP in UDP socket",
+			    __func__);
+		}
+	}
+#endif
 
 	if (bind(s, sa, sa->sa_len) == -1) {
 		log_warn("%s: failed to bind UDP socket", __func__);

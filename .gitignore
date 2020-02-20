@@ -9,6 +9,7 @@
 .#*
 .deps
 .DS_Store
+.gdbinit
 m4
 aclocal.m4
 autom4te.cache
@@ -29,3 +30,7 @@ ylwrap
 *_map.c
 clang_*
 *-scan-build
+*.html8
+*.html5
+iked
+ikectl

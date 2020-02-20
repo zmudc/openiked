@@ -199,7 +199,7 @@ ca_delkey(struct ca *ca, char *keyname)
 int
 ca_request(struct ca *ca, char *keyname, int type)
 {
-	char		hostname[HOST_NAME_MAX+1];
+	char		hostname[_POSIX_HOST_NAME_MAX+1];
 	char		name[128];
 	char		key[PATH_MAX];
 	char		path[PATH_MAX];

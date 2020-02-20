@@ -12,6 +12,8 @@ MAN=		iked.conf.5 iked.8
 
 LDADD=		-lutil -levent -lcrypto
 DPADD=		${LIBUTIL} ${LIBEVENT} ${LIBCRYPTO}
+LDADD+=		-L../openbsd-compat -lopenbsd-compat
+DPADD+=		../openbsd-compat/libopenbsd-compat.a
 CFLAGS+=	-Wall -I${.CURDIR}
 CFLAGS+=	-Wstrict-prototypes -Wmissing-prototypes
 CFLAGS+=	-Wmissing-declarations
@@ -19,6 +21,9 @@ CFLAGS+=	-Wshadow -Wpointer-arith -Wcast-qual
 CFLAGS+=	-Wsign-compare
 CLEANFILES+=	ikev2_map.c eap_map.c
 GENERATED=	ikev2_map.c eap_map.c
+CPPFLAGS=	-include ../openbsd-compat/includes.h \
+		-I../openbsd-compat
+NOGCCERROR=	yes
 
 YFLAGS=
 
