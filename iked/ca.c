@@ -1571,6 +1571,8 @@ ca_sslinit(void)
 	/* Init hardware crypto engines. */
 	ENGINE_load_builtin_engines();
 	ENGINE_register_all_complete();
+
+	seed_rng();
 }
 
 void

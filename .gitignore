@@ -31,3 +31,5 @@ clang_*
 *-scan-build
 *.html8
 *.html5
+iked/iked
+ikectl/ikectl
