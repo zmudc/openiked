@@ -193,13 +193,13 @@ hash_new(uint8_t type, uint16_t id)
 	hash->hash_length = length;
 	hash->hash_fixedkey = fixedkey;
 
-	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
+	if ((ctx = HMAC_CTX_new()) == NULL) {
 		log_debug("%s: alloc hash ctx", __func__);
 		hash_free(hash);
 		return (NULL);
 	}
 
-	HMAC_CTX_init(ctx);
+	HMAC_Init_ex(ctx, NULL, fixedkey, md, NULL);
 	hash->hash_ctx = ctx;
 
 	return (hash);
@@ -221,10 +221,8 @@ hash_free(struct iked_hash *hash)
 {
 	if (hash == NULL)
 		return;
-	if (hash->hash_ctx != NULL) {
-		HMAC_CTX_cleanup(hash->hash_ctx);
-		free(hash->hash_ctx);
-	}
+	if (hash->hash_ctx != NULL)
+		HMAC_CTX_free(hash->hash_ctx);
 	ibuf_release(hash->hash_key);
 	free(hash);
 }
@@ -347,7 +345,7 @@ cipher_new(uint8_t type, uint16_t id, uint16_t id_length)
 	encr->encr_fixedkey = fixedkey;
 	encr->encr_ivlength = ivlength ? ivlength : length;
 
-	if ((ctx = calloc(1, sizeof(*ctx))) == NULL) {
+	if ((ctx = EVP_CIPHER_CTX_new()) == NULL) {
 		log_debug("%s: alloc cipher ctx", __func__);
 		cipher_free(encr);
 		return (NULL);
@@ -507,7 +505,7 @@ dsa_new(uint16_t id, struct iked_hash *prf, int sign)
 		dsa.dsa_hmac = 1;
 		break;
 	case IKEV2_AUTH_DSS_SIG:
-		dsa.dsa_priv = EVP_dss1();
+		dsa.dsa_priv = EVP_sha1();
 		break;
 	case IKEV2_AUTH_ECDSA_256:
 		dsa.dsa_priv = EVP_sha256();
@@ -535,12 +533,13 @@ dsa_new(uint16_t id, struct iked_hash *prf, int sign)
 	dsap->dsa_sign = sign;
 
 	if (dsap->dsa_hmac) {
-		if ((dsap->dsa_ctx = calloc(1, sizeof(HMAC_CTX))) == NULL) {
+		if ((dsap->dsa_ctx = HMAC_CTX_new()) == NULL) {
 			log_debug("%s: alloc hash ctx", __func__);
 			dsa_free(dsap);
 			return (NULL);
 		}
-		HMAC_CTX_init((HMAC_CTX *)dsap->dsa_ctx);
+		HMAC_Init_ex((HMAC_CTX *)dsap->dsa_ctx, NULL, 0,
+				dsa.dsa_priv, NULL);
 	} else {
 		if ((dsap->dsa_ctx = EVP_MD_CTX_create()) == NULL) {
 			log_debug("%s: alloc digest ctx", __func__);
@@ -570,8 +569,7 @@ dsa_free(struct iked_dsa *dsa)
 	if (dsa == NULL)
 		return;
 	if (dsa->dsa_hmac) {
-		HMAC_CTX_cleanup((HMAC_CTX *)dsa->dsa_ctx);
-		free(dsa->dsa_ctx);
+		HMAC_CTX_free((HMAC_CTX *)dsa->dsa_ctx);
 	} else {
 		EVP_MD_CTX_destroy((EVP_MD_CTX *)dsa->dsa_ctx);
 		if (dsa->dsa_key)
@@ -701,7 +699,7 @@ _dsa_verify_init(struct iked_dsa *dsa, const uint8_t *sig, size_t len)
 		    print_map(dsa->dsa_method, ikev2_auth_map));
 		return (-1);
 	}
-	keytype = EVP_PKEY_type(((EVP_PKEY *)dsa->dsa_key)->type);
+	keytype = EVP_PKEY_type(EVP_PKEY_id(dsa->dsa_key));
 	if (sig == NULL) {
 		log_debug("%s: signature missing", __func__);
 		return (-1);
@@ -785,7 +783,7 @@ _dsa_sign_encode(struct iked_dsa *dsa, uint8_t *ptr, size_t len, size_t *offp)
 		return (0);
 	if (dsa->dsa_key == NULL)
 		return (-1);
-	keytype = EVP_PKEY_type(((EVP_PKEY *)dsa->dsa_key)->type);
+	keytype = EVP_PKEY_type(EVP_PKEY_id(dsa->dsa_key));
 	for (i = 0; i < nitems(schemes); i++) {
 		/* XXX should avoid calling sc_md() each time... */
 		if (keytype == schemes[i].sc_keytype &&
@@ -843,6 +841,8 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	size_t		 tmplen;
 	int		 ret = -1;
 	int		 bnlen, off;
+	const		 BIGNUM **pr;
+	const		 BIGNUM **ps;
 
 	if (len % 2)
 		goto done;	/* must be even */
@@ -861,13 +861,15 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	p = tmp;
 	if (d2i_ECDSA_SIG(&obj, &p, tmplen) == NULL)
 		goto done;
-	if (BN_num_bytes(obj->r) > bnlen || BN_num_bytes(obj->s) > bnlen)
+	const ECDSA_SIG *cobj = obj;
+	ECDSA_SIG_get0(cobj, pr, ps);
+	if (BN_num_bytes(*pr) > bnlen || BN_num_bytes(*ps) > bnlen)
 		goto done;
 	memset(ptr, 0, len);
-	off = bnlen - BN_num_bytes(obj->r);
-	BN_bn2bin(obj->r, ptr + off);
-	off = 2 * bnlen - BN_num_bytes(obj->s);
-	BN_bn2bin(obj->s, ptr + off);
+	off = bnlen - BN_num_bytes(*pr);
+	BN_bn2bin(*pr, ptr + off);
+	off = 2 * bnlen - BN_num_bytes(*ps);
+	BN_bn2bin(*ps, ptr + off);
 	ret = 0;
  done:
 	free(tmp);
@@ -923,6 +925,8 @@ _dsa_verify_prepare(struct iked_dsa *dsa, uint8_t **sigp, size_t *lenp,
 	uint8_t		*ptr = NULL;
 	size_t		 bnlen, len, off;
 	int		 ret = -1;
+	const		 BIGNUM **pr;
+	const		 BIGNUM **ps;
 
 	*freemep = NULL;	/* don't return garbage in case of an error */
 
@@ -951,10 +955,13 @@ _dsa_verify_prepare(struct iked_dsa *dsa, uint8_t **sigp, size_t *lenp,
 		if (*lenp < 64 || *lenp > 132 || *lenp % 2)
 			goto done;
 		bnlen = (*lenp)/2;
+		if ((obj = ECDSA_SIG_new()) == NULL)
+			goto done;
+		const ECDSA_SIG *cobj = obj;
+		ECDSA_SIG_get0(cobj, pr, ps);
 		/* sigp points to concatenation: r|s */
-		if ((obj = ECDSA_SIG_new()) == NULL ||
-		    BN_bin2bn(*sigp, bnlen, obj->r) == NULL ||
-		    BN_bin2bn(*sigp+bnlen, bnlen, obj->s) == NULL ||
+		if (BN_bin2bn(*sigp, bnlen, *pr) == NULL ||
+		    BN_bin2bn(*sigp+bnlen, bnlen, *ps) == NULL ||
 		    (len = i2d_ECDSA_SIG(obj, &ptr)) == 0)
 			goto done;
 		*lenp = len;

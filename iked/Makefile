@@ -1,5 +1,7 @@
 # $OpenBSD: Makefile,v 1.17 2017/07/19 12:50:32 espie Exp $
 
+.include <bsd.init.mk>
+
 PROG=		iked
 SRCS=		ca.c chap_ms.c config.c control.c crypto.c dh.c \
 		eap.c iked.c ikev2.c ikev2_msg.c ikev2_pld.c \
@@ -20,6 +22,7 @@ CFLAGS+=	-Wstrict-prototypes -Wmissing-prototypes
 CFLAGS+=	-Wmissing-declarations
 CFLAGS+=	-Wshadow -Wpointer-arith -Wcast-qual
 CFLAGS+=	-Wsign-compare
+CFLAGS+=	-g
 CLEANFILES+=	ikev2_map.c eap_map.c
 GENERATED=	ikev2_map.c eap_map.c
 CPPFLAGS=	-include ../openbsd-compat/includes.h \
