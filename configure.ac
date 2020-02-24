@@ -2275,7 +2275,7 @@ AC_RUN_IFELSE(
 #include <stdlib.h>
 #include <string.h>
 	]], [[
-	exit(strcmp(event_get_version(), _EVENT_VERSION) == 0 ? 0 : 1);
+	exit(strcmp(event_get_version(), EVENT__VERSION) == 0 ? 0 : 1);
 	]])],
 	[
 		AC_MSG_RESULT([yes])
