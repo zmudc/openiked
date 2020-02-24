@@ -9,12 +9,13 @@
 .#*
 .deps
 .DS_Store
-.gdbinit
 m4
 aclocal.m4
+Makefile
 autom4te.cache
 compile
 config.guess
+config.h
 config.status
 config.sub
 configure
@@ -26,10 +27,8 @@ missing
 parse.c
 stamp-h1
 ylwrap
+iked/iked
+ikectl/ikectl
 *_map.c
 clang_*
 *-scan-build
-*.html8
-*.html5
-iked/iked
-ikectl/ikectl
