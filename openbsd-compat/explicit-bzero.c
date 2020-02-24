@@ -33,18 +33,26 @@ __explicit_bzero_hook(void *buf, size_t len)
 {
 }
 
+/* XXX When groupfree in dh.c calls freezero/explicit_bzero,
+ * the buf/ptr is NULL, but len or sz is defined. Need to check if
+ * group->curve25519 should be initialized as it presumably is in
+ * the native OpenBSD version */
 void
 explicit_bzero(void *buf, size_t len)
 {
-	memset(buf, 0, len);
-	__explicit_bzero_hook(buf, len);
+	if (buf) {
+		memset(buf, 0, len);
+		__explicit_bzero_hook(buf, len);
+	}
 }
 
 void
 freezero(void *ptr, size_t sz)
 {
-	explicit_bzero(ptr, sz);
-	free(ptr);
+	if (ptr) {
+		explicit_bzero(ptr, sz);
+		free(ptr);
+	}
 }
 #endif
 
