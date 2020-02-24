@@ -254,7 +254,7 @@ udp_bind(struct sockaddr *sa, in_port_t port)
 	val = UDP_ENCAP_ESPINUDP;
 	if (sa->sa_family == AF_INET
 	    && port == ntohs(IKED_NATT_PORT)) {
-		log_info("%s: setting ESP in UDP socket",
+		log_debug("%s: configuring UDP socket for NAT-T",
 		    __func__);
 		if (setsockopt(s, IPPROTO_UDP, UDP_ENCAP,
 			       &val, sizeof(int)) < 0) {
