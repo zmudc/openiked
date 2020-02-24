@@ -3,6 +3,12 @@ OpenIKED
 
 This is a development mirror of OpenBSD's iked.
 
+This fork/branch is for developing the portable version. It is a
+work in progress and recently forked off the old portable branch
+that dates back to 2013. It is not functional yet. The main areas
+that need work is the pfkeyv2 interface and the compatability with
+different versions of OpenSSL.
+
 iked is a lean Internet Key Exchange (IKEv2) daemon which performs
 mutual authentication and which establishes and maintains IPsec VPN
 flows and security associations (SAs) between the two peers.  The

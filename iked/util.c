@@ -264,11 +264,10 @@ udp_bind(struct sockaddr *sa, in_port_t port)
 	}
 #endif
 
-	if (bind(s, sa, sa->sa_len) == -1) {
+	if (bind(s, sa, SA_LEN(sa)) == -1) {
 		log_warn("%s: failed to bind UDP socket", __func__);
 		goto bad;
 	}
-
 	return (s);
  bad:
 	close(s);

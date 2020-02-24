@@ -338,7 +338,7 @@ void
 mschap_radiuskey(uint8_t *plain, const uint8_t *crypted,
     const uint8_t *authenticator, const uint8_t *secret)
 {
-	EVP_MD_CTX *ctx = EVP_MD_CTX_new();
+	EVP_MD_CTX 	*ctx = EVP_MD_CTX_new();
 	uint8_t		 b[MD5_DIGEST_LENGTH], p[32];
 	unsigned int	 i, mdlen;
 

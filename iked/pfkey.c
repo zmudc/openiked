@@ -737,15 +737,18 @@ pfkey_sa(int sd, uint8_t satype, uint8_t action, struct iked_childsa *sa)
 #endif
 
 	bzero(&sa_src, sizeof(sa_src));
-	sa_src.sadb_address_len = (sizeof(sa_src) + ROUNDUP(ssrc.ss_len)) / 8;
+	sa_src.sadb_address_len =
+	    (sizeof(sa_src) + ROUNDUP(SS_LEN(&ssrc))) / 8;
 	sa_src.sadb_address_exttype = SADB_EXT_ADDRESS_SRC;
 
 	bzero(&sa_dst, sizeof(sa_dst));
-	sa_dst.sadb_address_len = (sizeof(sa_dst) + ROUNDUP(sdst.ss_len)) / 8;
+	sa_dst.sadb_address_len =
+	    (sizeof(sa_dst) + ROUNDUP(SS_LEN(&sdst))) / 8;
 	sa_dst.sadb_address_exttype = SADB_EXT_ADDRESS_DST;
 
 	bzero(&sa_pxy, sizeof(sa_pxy));
-	sa_pxy.sadb_address_len = (sizeof(sa_pxy) + ROUNDUP(spxy.ss_len)) / 8;
+	sa_pxy.sadb_address_len =
+	    (sizeof(sa_pxy) + ROUNDUP(SS_LEN(&spxy))) / 8;
 	sa_pxy.sadb_address_exttype = SADB_EXT_ADDRESS_PROXY;
 
 	bzero(&sa_authkey, sizeof(sa_authkey));
