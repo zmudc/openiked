@@ -4,11 +4,11 @@ OpenIKED
 This is the port of OpenBSD's iked to Darwin/OS X and other
 operating systems (see "Supported Platforms").
 
-This fork/branch is for developing the portable version. It is a
-work in progress and recently forked off the old portable branch
-that dates back to 2013. It is not functional yet. The main areas
-that need work is the pfkeyv2 interface and the compatability with
-different versions of OpenSSL.
+This fork/branch is for developing the portable version. It has
+recently been updated and is now based on an up-to-date version of
+OpenBSD's native iked. It has been tested on recent versions of
+NetBSD and works on NetBSD with some limitations (see "Caveats,
+bugs and limitations").
 
 iked is a lean Internet Key Exchange (IKEv2) daemon which performs
 mutual authentication and which establishes and maintains IPsec VPN
@@ -102,7 +102,7 @@ Portable version:
 * Darwin (Apple OS X Mountain Lion 10.8)
 * Linux (Ubuntu 12.10 GNU/Linux 3.5.0-19-generic)
 * FreeBSD (FreeBSD 9.0-RELEASE with IPSEC kernel)
-* NetBSD (NetBSD 6.0 with IPSEC kernel)
+* NetBSD (NetBSD 9 or later)
 * TODO: other BSDs and PFKEYv2/KAME-based platforms.
 
 Development
@@ -166,13 +166,19 @@ OpenBSD and other systems is the API and availability of the IPsec
 PFKEYv2 flow implementation (SADB) and message passing between kernel
 and iked.  Current known limitations are:
 
-* VPN traffic leakage prevention:
-Automatic blocking of IPv6 traffic is not working on KAME-bases stacks.
+* IPv6 and MOBIKE support:
+Features dependent on OpenBSD's native pfkey implementation may not work.
+Currently on NetBSD this includes IPv6 flows which do not work on NetBSD,
+and MOBIKE has not yet been tested using this portable version.
 
 * NAT-T:
-NAT-T is only supported on OpenBSD and Darwin (OS X).  The NAT-T API
-is not standardized in PFKEYv2, not even on a semi-level, and differs
+NAT-T is only supported on OpenBSD, Darwin (OS X), and NetBSD.  The NAT-T
+API is not standardized in PFKEYv2, not even on a semi-level, and differs
 in most operating systems, if supported at all.
+
+* Integration with OpenBSD specific components:
+Support for integration with the OpenBSD enc device and the OpenBSD packet
+filter tagging feature is not available on systems lacking these components.
 
 * Crypto algorithms:
 Some of the crypto algorithms are either not supported on other systems
