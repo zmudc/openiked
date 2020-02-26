@@ -29,6 +29,7 @@ stamp-h1
 ylwrap
 iked/iked
 ikectl/ikectl
+rc/iked
 *_map.c
 clang_*
 *-scan-build
