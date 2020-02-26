@@ -2473,6 +2473,8 @@ AC_CONFIG_FILES([Makefile
 		openbsd-compat/Makefile
 		iked/Makefile
 		ikectl/Makefile
+		rc/Makefile
+		rc/iked
 		])
 
 AC_OUTPUT

@@ -1,4 +1,4 @@
-SUBDIRS=		openbsd-compat iked ikectl
+SUBDIRS=		openbsd-compat iked ikectl rc
 ACLOCAL_AMFLAGS=	-I m4
 
 PRIVKEY=$(DESTDIR)$(sysconfdir)/iked/private/local.key
