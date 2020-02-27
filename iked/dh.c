@@ -408,14 +408,13 @@ modp_getlen(struct group *group)
 int
 modp_create_exchange(struct group *group, u_int8_t *buf)
 {
-	const BIGNUM	*pubkey;
+	const BIGNUM	*pub_key;
 	int		 len, ret;
 
 	if (!DH_generate_key(group->dh))
 		return (-1);
-
-	DH_get0_key(group->dh, &pubkey, NULL);
-	ret = BN_bn2bin(pubkey, buf);
+	DH_get0_key(group->dh, &pub_key, NULL);
+	ret = BN_bn2bin(pub_key, buf);
 	if (!ret)
 		return (-1);
 
