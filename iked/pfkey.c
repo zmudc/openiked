@@ -580,7 +580,7 @@ pfkey_flow(int sd, uint8_t satype, uint8_t action, struct iked_flow *flow)
 	iov[iov_cnt].iov_len = sizeof(sa_src);
 	iov_cnt++;
 	iov[iov_cnt].iov_base = &ssrc;
-	iov[iov_cnt].iov_len = SS_LEN(&ssrc);
+	iov[iov_cnt].iov_len = ROUNDUP(SS_LEN(&ssrc));
 	smsg.sadb_msg_len += sa_src.sadb_address_len;
 	iov_cnt++;
 
@@ -589,7 +589,7 @@ pfkey_flow(int sd, uint8_t satype, uint8_t action, struct iked_flow *flow)
 	iov[iov_cnt].iov_len = sizeof(sa_dst);
 	iov_cnt++;
 	iov[iov_cnt].iov_base = &sdst;
-	iov[iov_cnt].iov_len = SS_LEN(&sdst);
+	iov[iov_cnt].iov_len = ROUNDUP(SS_LEN(&sdst));
 	smsg.sadb_msg_len += sa_dst.sadb_address_len;
 	iov_cnt++;
 
