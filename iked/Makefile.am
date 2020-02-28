@@ -26,6 +26,7 @@ CONFIGFILES_IN=	iked.conf
 EXTRA_DIST=	$(CONFIGFILES_IN) $(MANPAGES_IN)
 CLEANFILES=	$(iked_MAPS) $(CONFIGFILES) $(MANPAGES)
 PATHSUBS=	-e 's|/etc/iked/|$(sysconfdir)/iked/|g'			\
+		-e 's|/etc/iked.conf|$(sysconfdir)/iked.conf|g'		\
 		-e 's|/usr/libexec|$(libexecdir)|g'			\
 		-e 's|/var/run/iked.sock|$(sockdir)/iked.sock|g'
 FIXPATHSCMD=	$(SED) $(PATHSUBS)
