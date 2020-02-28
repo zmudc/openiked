@@ -9,11 +9,23 @@
 
 . /etc/rc.subr
 
+# We only need to stop the process owned by root
+check_process_root()
+{
+	_procname=$1
+	_interpreter=$2
+	if [ -z "$_procname" ]; then
+		err 3 'USAGE: check_process procname [interpreter]'
+	fi
+	_find_processes $_procname ${_interpreter:-.} '-Uxroot'
+}
+
 exec_prefix="@prefix@"
 prefix="@prefix@"
 name="iked"
 rcvar=$name
 command="@sbindir@/${name}"
+check_process_root ${name}
 extra_commands="reload"
 required_files="@sysconfdir@/iked.conf"
 reload_cmd="@sbindir@/ikectl ${extra_commands}"
