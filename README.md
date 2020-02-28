@@ -168,8 +168,9 @@ and iked.  Current known limitations are:
 
 * IPv6 and MOBIKE support:
 Features dependent on OpenBSD's native pfkey implementation may not work.
-Currently on NetBSD this includes IPv6 flows which do not work on NetBSD,
-and MOBIKE has not yet been tested using this portable version.
+Recently, support for IPv6 flows has been added for NetBSD. MOBIKE support
+has been added to the native OpenBSD version but has not yet been tested in
+this portable version.
 
 * NAT-T:
 NAT-T is only supported on OpenBSD, Darwin (OS X), and NetBSD.  The NAT-T
