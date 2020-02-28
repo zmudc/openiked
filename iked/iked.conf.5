@@ -593,6 +593,8 @@ included.
 The address of an internal remote access server.
 .El
 .It Ic tag Ar string
+This option has no effect on systems without an OpenBSD compatible
+pfkeyv2 API and OpenBSD packet filter that supports tagging.
 Add a
 .Xr pf 4
 tag to all packets of IPsec SAs created for this connection.
@@ -646,6 +648,10 @@ The variable expansion for the
 directive occurs only at runtime (not when the file is parsed)
 and must be quoted, or it will be interpreted as a macro.
 .It Ic tap Ar interface
+This option has no effect on systems without an OpenBSD
+compatible pfkeyv2 API and an OpenBSD compatible
+.Xr enc 4
+.Ar interface.
 Send the decapsulated IPsec traffic to the specified
 .Xr enc 4
 .Ar interface
@@ -657,6 +663,10 @@ The traffic will be blocked if the specified
 does not exist.
 .El
 .Sh PACKET FILTERING
+This section only applies to systems with an OpenBSD compatible
+pfkeyv2 API, OpenBSD compatible packet filter tagging, and
+.Xr enc 4
+interface.
 IPsec traffic appears unencrypted on the
 .Xr enc 4
 interface
