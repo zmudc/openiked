@@ -841,8 +841,8 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	size_t		 tmplen;
 	int		 ret = -1;
 	int		 bnlen, off;
-	const		 BIGNUM **pr;
-	const		 BIGNUM **ps;
+	const		 BIGNUM *pr;
+	const		 BIGNUM *ps;
 
 	if (len % 2)
 		goto done;	/* must be even */
@@ -862,14 +862,14 @@ _dsa_sign_ecdsa(struct iked_dsa *dsa, uint8_t *ptr, size_t len)
 	if (d2i_ECDSA_SIG(&obj, &p, tmplen) == NULL)
 		goto done;
 	const ECDSA_SIG *cobj = obj;
-	ECDSA_SIG_get0(cobj, pr, ps);
-	if (BN_num_bytes(*pr) > bnlen || BN_num_bytes(*ps) > bnlen)
+	ECDSA_SIG_get0(cobj, &pr, &ps);
+	if (BN_num_bytes(pr) > bnlen || BN_num_bytes(ps) > bnlen)
 		goto done;
 	memset(ptr, 0, len);
-	off = bnlen - BN_num_bytes(*pr);
-	BN_bn2bin(*pr, ptr + off);
-	off = 2 * bnlen - BN_num_bytes(*ps);
-	BN_bn2bin(*ps, ptr + off);
+	off = bnlen - BN_num_bytes(pr);
+	BN_bn2bin(pr, ptr + off);
+	off = 2 * bnlen - BN_num_bytes(ps);
+	BN_bn2bin(ps, ptr + off);
 	ret = 0;
  done:
 	free(tmp);
@@ -925,8 +925,8 @@ _dsa_verify_prepare(struct iked_dsa *dsa, uint8_t **sigp, size_t *lenp,
 	uint8_t		*ptr = NULL;
 	size_t		 bnlen, len, off;
 	int		 ret = -1;
-	const		 BIGNUM **pr;
-	const		 BIGNUM **ps;
+	BIGNUM 		*pr;
+	BIGNUM 		*ps;
 
 	*freemep = NULL;	/* don't return garbage in case of an error */
 
@@ -957,11 +957,10 @@ _dsa_verify_prepare(struct iked_dsa *dsa, uint8_t **sigp, size_t *lenp,
 		bnlen = (*lenp)/2;
 		if ((obj = ECDSA_SIG_new()) == NULL)
 			goto done;
-		const ECDSA_SIG *cobj = obj;
-		ECDSA_SIG_get0(cobj, pr, ps);
 		/* sigp points to concatenation: r|s */
-		if (BN_bin2bn(*sigp, bnlen, *pr) == NULL ||
-		    BN_bin2bn(*sigp+bnlen, bnlen, *ps) == NULL ||
+		if ((pr = BN_bin2bn(*sigp, bnlen, NULL)) == NULL ||
+		    (ps = BN_bin2bn(*sigp+bnlen, bnlen, NULL)) == NULL ||
+		    !ECDSA_SIG_set0(obj, pr, ps) ||
 		    (len = i2d_ECDSA_SIG(obj, &ptr)) == 0)
 			goto done;
 		*lenp = len;
