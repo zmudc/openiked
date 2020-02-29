@@ -150,7 +150,7 @@ mschap_challenge_hash(uint8_t *peer_challenge, uint8_t *auth_challenge,
 	uint8_t		 md[SHA_DIGEST_LENGTH];
 	unsigned int	 mdlen;
 	const char 	*cusername = (const char *)username;
-	uint8_t		*name = strrchr(cusername, '\\');
+	uint8_t		*name = (uint8_t *)strrchr(cusername, '\\');
 
 	if (name == NULL)
 		name = username;
@@ -341,9 +341,10 @@ mschap_radiuskey(uint8_t *plain, const uint8_t *crypted,
 	EVP_MD_CTX 	*ctx = EVP_MD_CTX_new();
 	uint8_t		 b[MD5_DIGEST_LENGTH], p[32];
 	unsigned int	 i, mdlen;
+	size_t slen =    strlen((const char *)secret);
 
 	EVP_DigestInit(ctx, EVP_md5());
-	EVP_DigestUpdate(ctx, secret, strlen(secret));
+	EVP_DigestUpdate(ctx, secret, slen);
 	EVP_DigestUpdate(ctx, authenticator, 16);
 	EVP_DigestUpdate(ctx, crypted, 2);
 	EVP_DigestFinal(ctx, b, &mdlen);
@@ -353,7 +354,7 @@ mschap_radiuskey(uint8_t *plain, const uint8_t *crypted,
 	}
 
 	EVP_DigestInit(ctx, EVP_md5());
-	EVP_DigestUpdate(ctx, secret, strlen(secret));
+	EVP_DigestUpdate(ctx, secret, slen);
 	EVP_DigestUpdate(ctx, crypted + 2, mdlen);
 	EVP_DigestFinal(ctx, b, &mdlen);
 

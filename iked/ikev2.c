@@ -1381,7 +1381,8 @@ ikev2_policy2id(struct iked_static_id *polid, struct iked_id *id, int srcid)
 		break;
 	case IKEV2_ID_ASN1_DN:
 		/* policy has ID in string-format, convert to ASN1 */
-		if ((name = ca_x509_name_parse(polid->id_data)) == NULL ||
+		if ((name = ca_x509_name_parse((char *)polid->id_data))
+		    == NULL ||
 		    (len = i2d_X509_NAME(name, NULL)) < 0 ||
 		    (p = ibuf_reserve(id->id_buf, len)) == NULL ||
 		    (i2d_X509_NAME(name, &p)) < 0) {
@@ -4204,8 +4205,8 @@ ikev2_ike_sa_alive(struct iked *env, void *arg)
 			continue;
 		gettimeofday(&tv, NULL);
 		diff = (uint32_t)(tv.tv_sec - last_used);
-		log_debug("%s: %s CHILD SA spi %s last used %llu second(s) ago",
-		    __func__,
+		log_debug("%s: %s CHILD SA spi %s last used %" PRIu64
+		    " second(s) ago", __func__,
 		    csa->csa_dir == IPSP_DIRECTION_IN ? "incoming" : "outgoing",
 		    print_spi(csa->csa_spi.spi, csa->csa_spi.spi_size), diff);
 		if (diff < IKED_IKE_SA_ALIVE_TIMEOUT) {

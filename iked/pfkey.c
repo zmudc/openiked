@@ -1195,7 +1195,7 @@ pfkey_sa_last_used(int sd, struct iked_childsa *sa, uint64_t *last_used)
 		goto done;
 	}
 	*last_used = sa_life->sadb_lifetime_usetime;
-	log_debug("%s: last_used %llu", __func__, *last_used);
+	log_debug("%s: last_used %" PRIu64, __func__, *last_used);
 
 done:
 	freezero(data, n);

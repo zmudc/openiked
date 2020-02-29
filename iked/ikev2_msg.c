@@ -441,6 +441,7 @@ ikev2_msg_encrypt(struct iked *env, struct iked_sa *sa, struct ibuf *src)
 
 	cipher_setkey(sa->sa_encr, encr->buf, ibuf_length(encr));
 	cipher_setiv(sa->sa_encr, NULL, 0);	/* XXX ivlen */
+	(void)&ivlen;
 	cipher_init_encrypt(sa->sa_encr);
 
 	if ((dst = ibuf_dup(sa->sa_encr->encr_iv)) == NULL)
@@ -537,8 +538,8 @@ struct ibuf *
 ikev2_msg_decrypt(struct iked *env, struct iked_sa *sa,
     struct ibuf *msg, struct ibuf *src)
 {
-	ssize_t			 ivlen, encrlen, integrlen, blocklen,
-				    outlen, tmplen;
+	ssize_t			 ivlen, encrlen, integrlen, blocklen;
+	size_t			 tmplen, outlen;
 	uint8_t			 pad = 0, *ptr;
 	struct ibuf		*integr, *encr, *tmp = NULL, *out = NULL;
 	off_t			 ivoff, encroff, integroff;

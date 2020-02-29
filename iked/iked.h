@@ -1034,7 +1034,7 @@ void	 lc_string(char *);
 void	 print_hex(const uint8_t *, off_t, size_t);
 void	 print_hexval(const uint8_t *, off_t, size_t);
 const char *
-	 print_bits(unsigned short, unsigned char *);
+	 print_bits(unsigned short, const char *);
 int	 sockaddr_cmp(struct sockaddr *, struct sockaddr *, int);
 uint8_t mask2prefixlen(struct sockaddr *);
 uint8_t mask2prefixlen6(struct sockaddr *);
@@ -1044,7 +1044,7 @@ uint32_t
 	 prefixlen2mask(uint8_t);
 const char *
 	 print_host(struct sockaddr *, char *, size_t);
-char	*get_string(uint8_t *, size_t);
+char	*get_string(const uint8_t *, size_t);
 const char *
 	 print_proto(uint8_t);
 int	 expand_string(char *, size_t, const char *, const char *);

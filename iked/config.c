@@ -487,7 +487,7 @@ int
 config_getmode(struct iked *env, unsigned int type)
 {
 	uint8_t		 old;
-	unsigned char	*mode[] = { "active", "passive" };
+	const char	*mode[] = { "active", "passive" };
 
 	old = env->sc_passive ? 1 : 0;
 	env->sc_passive = type == IMSG_CTL_PASSIVE ? 1 : 0;

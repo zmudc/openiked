@@ -475,10 +475,10 @@ print_spi(uint64_t spi, int size)
 		snprintf(ptr, 32, "0x%08x", (uint32_t)spi);
 		break;
 	case 8:
-		snprintf(ptr, 32, "0x%016llx", spi);
+		snprintf(ptr, 32, "0x%016" PRIx64, spi);
 		break;
 	default:
-		snprintf(ptr, 32, "%llu", spi);
+		snprintf(ptr, 32, "%" PRIu64, spi);
 		break;
 	}
 
@@ -555,7 +555,7 @@ print_hexval(const uint8_t *buf, off_t offset, size_t length)
 }
 
 const char *
-print_bits(unsigned short v, unsigned char *bits)
+print_bits(unsigned short v, const char *bits)
 {
 	static char	 buf[IKED_CYCLE_BUFFERS][BUFSIZ];
 	static int	 idx = 0;
@@ -725,7 +725,7 @@ print_host(struct sockaddr *sa, char *buf, size_t len)
 }
 
 char *
-get_string(uint8_t *ptr, size_t len)
+get_string(const uint8_t *ptr, size_t len)
 {
 	size_t	 i;
 
@@ -733,7 +733,7 @@ get_string(uint8_t *ptr, size_t len)
 		if (!isprint(ptr[i]))
 			break;
 
-	return strndup(ptr, i);
+	return strndup((const char *)ptr, i);
 }
 
 const char *

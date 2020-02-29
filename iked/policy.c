@@ -80,7 +80,7 @@ policy_lookup(struct iked *env, struct iked_message *msg)
 	    (s = strchr(idstr, '/')) != NULL) {
 		pol.pol_peerid.id_type = msg->msg_id.id_type;
 		pol.pol_peerid.id_length = strlen(s+1);
-		strlcpy(pol.pol_peerid.id_data, s+1,
+		strlcpy((char *)pol.pol_peerid.id_data, s+1,
 		    sizeof(pol.pol_peerid.id_data));
 		log_debug("%s: peerid '%s'", __func__, s+1);
 	}

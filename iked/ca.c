@@ -582,7 +582,8 @@ ca_reload(struct iked *env)
 	X509_OBJECT		*xo;
 	X509			*x509;
 	DIR			*dir;
-	int			 i, len, iovcnt = 0;
+	int			 i, iovcnt = 0;
+	unsigned int		 len;
 
 	/*
 	 * Load CAs
@@ -1140,7 +1141,8 @@ ca_x509_name_unescape(char *src, char *dst, char marker)
 void *
 ca_x509_name_parse(char *subject)
 {
-	char		*cp, *value = NULL, *type = NULL;
+	char		*cp, *type = NULL;
+	char		*value = NULL;
 	size_t		 maxlen;
 	X509_NAME	*name = NULL;
 
@@ -1181,7 +1183,7 @@ ca_x509_name_parse(char *subject)
 		}
 		log_debug("%s: setting '%s' to '%s'", __func__, type, value);
 		if (!X509_NAME_add_entry_by_txt(name, type, MBSTRING_ASC,
-		    value, -1, -1, 0)) {
+		    (uint8_t *)value, -1, -1, 0)) {
 			log_warnx("%s: setting '%s' to '%s' failed", __func__,
 			    type, value);
 			ca_sslerror(__func__);
@@ -1450,7 +1452,7 @@ ca_x509_subjectaltname_do(X509 *cert, int mode, const char *logmsg,
 	ASN1_STRING *cstr;
 	char idstr[IKED_ID_SIZE];
 	int idx, ret, i, type, len;
-	uint8_t *data;
+	const uint8_t *data;
 
 	ret = -1;
 	idx = -1;
@@ -1490,7 +1492,7 @@ ca_x509_subjectaltname_do(X509 *cert, int mode, const char *logmsg,
 				continue;
 			}
 			len = ASN1_STRING_length(cstr);
-			data = ASN1_STRING_data(cstr);
+			data = ASN1_STRING_get0_data(cstr);
 			if (mode == MODE_ALT_LOG) {
 				struct iked_id sanid;
 

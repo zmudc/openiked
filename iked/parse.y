@@ -23,6 +23,7 @@
  */
 
 %{
+#define _OPENBSD_SOURCE
 #include <sys/types.h>
 #include <sys/ioctl.h>
 #include <sys/queue.h>
@@ -81,7 +82,7 @@ int		 yyerror(const char *, ...)
     __attribute__((__format__ (printf, 1, 2)))
     __attribute__((__nonnull__ (1)));
 int		 kw_cmp(const void *, const void *);
-int		 lookup(char *);
+int		 lookup(const char *);
 int		 igetc(void);
 int		 lgetc(int);
 void		 lungetc(int);
@@ -691,7 +692,7 @@ host_spec	: STRING			{
 		| STRING '/' NUMBER		{
 			char	*buf;
 
-			if (asprintf(&buf, "%s/%lld", $1, $3) == -1)
+			if (asprintf(&buf, "%s/%" PRId64, $1, $3) == -1)
 				err(1, "host: asprintf");
 			free($1);
 			if (($$ = host(buf)) == NULL)	{
@@ -960,7 +961,7 @@ byte_spec	: NUMBER			{
 			uint64_t	 bytes = 0;
 			char		 unit = 0;
 
-			if (sscanf($1, "%llu%c", &bytes, &unit) != 2) {
+			if (sscanf($1, "%" PRIu64 "%c", &bytes, &unit) != 2) {
 				yyerror("invalid byte specification: %s", $1);
 				YYERROR;
 			}
@@ -989,7 +990,7 @@ time_spec	: NUMBER			{
 			uint64_t	 seconds = 0;
 			char		 unit = 0;
 
-			if (sscanf($1, "%llu%c", &seconds, &unit) != 2) {
+			if (sscanf($1, "%" PRIu64 "%c", &seconds, &unit) != 2) {
 				yyerror("invalid time specification: %s", $1);
 				YYERROR;
 			}
@@ -1033,10 +1034,11 @@ keyspec		: STRING			{
 
 			bzero(&$$, sizeof($$));
 
-			hex = $1;
-			if (strncmp(hex, "0x", 2) == 0) {
+			hex = (uint8_t *)$1;
+			if (strncmp((const char *)hex, "0x", 2) == 0) {
 				hex += 2;
-				if (parsekey(hex, strlen(hex), &$$) != 0) {
+				if (parsekey(hex, strlen((const char *)hex),
+				    &$$) != 0) {
 					free($1);
 					YYERROR;
 				}
@@ -1046,7 +1048,7 @@ keyspec		: STRING			{
 					free($1);
 					YYERROR;
 				}
-				strlcpy($$.auth_data, $1,
+				strlcpy((char *)$$.auth_data, $1,
 				    sizeof($$.auth_data));
 				$$.auth_length = strlen($1);
 			}
@@ -1202,7 +1204,7 @@ kw_cmp(const void *k, const void *e)
 }
 
 int
-lookup(char *s)
+lookup(const char *s)
 {
 	/* this has to be sorted always */
 	static const struct keywords keywords[] = {
@@ -1416,12 +1418,12 @@ top:
 			lungetc(c);
 			break;
 		}
-		val = symget(buf);
+		val = (uint8_t *)symget((const char *)buf);
 		if (val == NULL) {
 			yyerror("macro '%s' not defined", buf);
 			return (findeol());
 		}
-		p = val + strlen(val) - 1;
+		p = val + strlen((const char *)val) - 1;
 		lungetc(DONE_EXPAND);
 		while (p >= val) {
 			lungetc(*p);
@@ -1465,7 +1467,7 @@ top:
 			}
 			*p++ = c;
 		}
-		yylval.v.string = strdup(buf);
+		yylval.v.string = strdup((const char *)buf);
 		if (yylval.v.string == NULL)
 			err(1, "%s", __func__);
 		return (STRING);
@@ -1489,7 +1491,7 @@ top:
 			const char *errstr = NULL;
 
 			*p = '\0';
-			yylval.v.number = strtonum(buf, LLONG_MIN,
+			yylval.v.number = strtonum((const char *)buf, LLONG_MIN,
 			    LLONG_MAX, &errstr);
 			if (errstr) {
 				yyerror("\"%s\" invalid number: %s",
@@ -1523,8 +1525,8 @@ nodigits:
 		} while ((c = lgetc(0)) != EOF && (allowed_in_string(c)));
 		lungetc(c);
 		*p = '\0';
-		if ((token = lookup(buf)) == STRING)
-			if ((yylval.v.string = strdup(buf)) == NULL)
+		if ((token = lookup((const char *)buf)) == STRING)
+			if ((yylval.v.string = strdup((const char *)buf)) == NULL)
 				err(1, "%s", __func__);
 		return (token);
 	}
@@ -2588,7 +2590,7 @@ print_policy(struct iked_policy *pol)
 	if (pol->pol_rekey)
 		print_verbose(" ikelifetime %u", pol->pol_rekey);
 
-	print_verbose(" lifetime %llu bytes %llu",
+	print_verbose(" lifetime %" PRIu64 " bytes %" PRIu64,
 	    pol->pol_lifetime.lt_seconds, pol->pol_lifetime.lt_bytes);
 
 	switch (pol->pol_auth.auth_method) {
