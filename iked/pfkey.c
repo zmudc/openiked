@@ -2145,7 +2145,6 @@ out:
 				    flow->flow_dir == IPSP_DIRECTION_IN ?
 				    "in" : "out", flow->flow_id);
 				ikev2_acquire_sa(env, flow);
-				free(flow);
 				break;
 			}
 		}
