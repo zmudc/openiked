@@ -1961,7 +1961,6 @@ pfkey_process(struct iked *env, struct pfkey_message *pm)
 
 	switch (hdr->sadb_msg_type) {
 	case SADB_ACQUIRE:
-		bzero(&flow, sizeof(flow));
 		bzero(&peer, sizeof(peer));
 
 		if ((sa_addr = pfkey_find_ext(data, len,
@@ -1982,6 +1981,8 @@ pfkey_process(struct iked *env, struct pfkey_message *pm)
 			log_debug("%s: invalid address", __func__);
 			return (0);
 		}
+		flow = malloc(sizeof(struct iked_flow));
+		bzero(flow, sizeof(struct iked_flow));
 		flow->flow_peer = &peer;
 
 		log_debug("%s: acquire request (peer %s)", __func__,
@@ -2128,6 +2129,7 @@ out:
 		if ((sa_pol = pfkey_find_ext(data, len,
 		    SADB_X_EXT_POLICY)) == NULL) {
 			log_debug("%s: no policy extension", __func__);
+			free(flow);
 			return (0);
 		}
 
@@ -2143,6 +2145,7 @@ out:
 				    flow->flow_dir == IPSP_DIRECTION_IN ?
 				    "in" : "out", flow->flow_id);
 				ikev2_acquire_sa(env, flow);
+				free(flow);
 				break;
 			}
 		}
