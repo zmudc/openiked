@@ -6229,7 +6229,9 @@ ikev2_cp_setaddr(struct iked *env, struct iked_sa *sa, sa_family_t family)
 			break;
 		case AF_INET6:
 			memcpy(in6, cfg6, sizeof(*in6));
-			nhost = htonl(host);
+			memcpy(&nhost, &cfg6->sin6_addr.s6_addr[12],
+				sizeof(uint32_t));
+			nhost = (nhost & mask) | htonl(host);
 			memcpy(&in6->sin6_addr.s6_addr[12], &nhost,
 			    sizeof(uint32_t));
 			break;
