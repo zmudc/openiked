@@ -15,6 +15,7 @@ MANPAGES_IN=	ikectl.8
 EXTRA_DIST=	$(MANPAGES_IN) ikeca.cnf
 CLEANFILES=	$(CONFIGFILES) $(MANPAGES)
 PATHSUBS=	-e 's|/etc/iked/|$(sysconfdir)/iked/|g'			\
+		-e 's|/etc/ssl/|$(sysconfdir)/ssl/|g'			\
 		-e 's|/usr/libexec|$(libexecdir)|g'			\
 		-e 's|/var/run/iked.sock|$(sockdir)/iked.sock|g'
 FIXPATHSCMD=	$(SED) $(PATHSUBS)
