@@ -552,7 +552,7 @@ pfkey_flow(int sd, uint8_t satype, uint8_t action, struct iked_flow *flow)
 		sa_ipsec.sadb_x_ipsecrequest_mode = IPSEC_MODE_TUNNEL; /* XXX */
 		sa_ipsec.sadb_x_ipsecrequest_level = IPSEC_LEVEL_REQUIRE;
 		sa_ipsec.sadb_x_ipsecrequest_len = sizeof(sa_ipsec) +
-		    ROUNDUP(SS_LEN(&slocal)) + ROUNDUP(SS_LEN(&speer));
+		    SS_LEN(&slocal) + SS_LEN(&speer);
 		padlen = ROUNDUP(sa_ipsec.sadb_x_ipsecrequest_len) -
 		    sa_ipsec.sadb_x_ipsecrequest_len;
 		sa_ipsec.sadb_x_ipsecrequest_len += padlen;
